@@ -1,9 +1,9 @@
 ﻿(*SINTASSI ASTRATTA*)
 datatype exp = const of int
              | var of string
-             | sum of exp list
-             | prod of exp list
-             | let_ of exp * exp * exp;
+             | sum of exp list (*args*)
+             | prod of exp list (*args*)
+             | let_ of exp (*declared var*) * exp (*assigned value*) * exp (*local block*);
 
 datatype env = tuple of string * int;
 
@@ -19,7 +19,7 @@ fun eval(e, const(k)) = k
   | eval(e, sum(l)) = foldl op+ 0 (map (fn x => eval(e, x)) l)
   | eval(e, prod(l)) = foldl op* 1 (map (fn x => eval(e, x)) l)
   | eval(e, let_(var(x), M, N)) = eval(tuple(x , eval(e, M))::e, N)
-  | eval(e, let_(_, M, N)) = raise SyntaxError("Invalid Syntax");
+  | eval(E, let_(_, _, _)) = raise SyntaxError "first arg in a 'let tuple' must be a variable";
 
 (*PARSING*)
 datatype s_exp = Atom of string | List of s_exp list;
@@ -29,7 +29,7 @@ fun tokenize (s : string) : string list = let
                                               | pad (#"(" :: rest) = #" " :: #"(" :: #" " :: pad rest
                                               | pad (#")" :: rest) = #" " :: #")" :: #" " :: pad rest
                                               | pad (c :: rest) = c :: pad rest
-                                            val padded = String.implode(pad(String.explode s @ [#" "]))
+                                            val padded = String.implode(pad((map Char.toLower (String.explode s)) @ [#" "]))
                                           in
                                             String.tokens Char.isSpace padded
                                           end;
@@ -68,9 +68,6 @@ fun IntFromString (s : string): int option =
           | cs => parseDigits cs 0
     end;
 
-fun SexpLen (Atom _) = 0
-  | SexpLen (List l) = length l;
-
 fun SexpList (Atom _) = NONE
   | SexpList (List l) = SOME l;
 
@@ -92,12 +89,12 @@ fun interpretSexp (List []) = raise SyntaxError "Empty List"
                                       List bindings => 
                                         foldl (fn (x, acc) => x andalso acc) 
                                               true 
-                                              (map (fn b => SexpLen b = 2) bindings)
+                                              (map (fn binding => length (valOf (SexpList binding)) = 2) bindings)
                                     | Atom _ => false))
                                then let
                                       val bindings = valOf (SexpList (hd args))
                                     in
-                                      foldl (fn (binding : s_exp, block : exp) =>
+                                      foldr (fn (binding : s_exp, block : exp) =>
                                               let_ (interpretSexp(hd (valOf (SexpList binding))),
                                               interpretSexp(hd (tl (valOf (SexpList binding)))),
                                               block))
@@ -113,4 +110,4 @@ fun execute (program : string) : int = eval([], interpretSexp(parseSexp program)
 
 (*---FINAL TEST---*)
 
-execute "(let ((x (+ 1 2 3)) (y 4) (z 5)) (+ x y z))";
+execute "(let ((x 2) (x 3)) (+ 1 2 x X))";
