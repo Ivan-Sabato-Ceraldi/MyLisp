@@ -12,19 +12,30 @@ datatype exp = const of constant
              | and_ of exp list (*bool args*)
              | or of exp list (*bool args*)
              | not_ of exp (*bool arg*)
+             | ifThenElse of exp (*bool arg*) * exp (*then block*) * exp (*else block*)             
              | let_ of exp (*declared var*) * exp (*assigned value*) * exp (*local block*)
+             | multiLet of (exp * exp) list (*bindings*) * exp (*local block*)
              | lambda of exp (*input var*) * exp (*function body*)
              | lambdaApp of exp (*lambda function*) * exp (*argument*);
 
-datatype env = tuple of string (*var name*) * value
-and      value = constVal of constant | closure of exp * exp (*lambda (var,body)*) * env list (*enviroment of declaration*);
+datatype enviroment = emptyEnv | extention of enviroment * string * value
+and      value = constVal of constant | closure of exp * exp (*lambda (var,body)*) * enviroment (*enviroment of declaration*);
 
+fun extend (emptyEnv, s , v ) = extention (emptyEnv, s, v)
+  | extend (extention(E, s', v'), s, v) = if (s = s')
+                                          then extention (E, s, v)
+                                          else extention (extend(E, s, v), s', v')
 exception SyntaxError of string;
 exception InternalError of string;
 
 (*HELPERS*)
 fun allTrue (l : bool list) = (foldl (fn (x, acc) => x andalso acc) true l);
+
 fun atLeastOneTrue (l : bool list) = (foldl (fn (x, acc) => x orelse acc) false l);
+
+fun hasDuplicates l = case l of
+                                      [] => false
+                                    | h::rest => List.exists (fn x => x = h) rest orelse hasDuplicates rest
 
 fun extractInt (constVal (integer k)) = k
   | extractInt _ = raise SyntaxError "The '+', '*', '>', '<', '>=', '<=' functions require numerical values as arguments";
@@ -36,9 +47,9 @@ fun extractBool (constVal (boolean k)) = k
 
 (*REGOLE DI INFERENZA*)
 fun eval(_ , const k) = constVal k
-  | eval([], var x) = raise SyntaxError("undeclared var :" ^ x)
-  | eval(tuple(x, k)::E, var y) = if (x = y) then
-                                    k
+  | eval(emptyEnv, var x) = raise SyntaxError("undeclared var :" ^ x)
+  | eval(extention(E, x, v), var y) = if (x = y) then
+                                    v
                                    else
                                     eval(E, var y)
   | eval(E, sum args) = applyOperator (E, args, "+")
@@ -49,16 +60,29 @@ fun eval(_ , const k) = constVal k
   | eval(E, and_ args) = applyOperator (E, args, "andalso")
   | eval(E, or args) = applyOperator (E, args, "orelse")
   | eval(E, not_ arg) = constVal (boolean (not (extractBool (eval (E, arg)))))
-  | eval(E, let_(var x, M, N)) = eval(tuple(x , eval(E, M))::E, N)
-  | eval(_, let_(_, _, _)) = raise SyntaxError "first arg in a 'let tuple' must be a variable"
+  | eval(E, ifThenElse(condition, M, N)) = (if extractBool (eval (E, condition))
+                                                          then eval(E, M)
+                                                          else eval(E, N))
+  | eval(E, let_(var x, M, N)) = eval(extend(E, x , eval(E, M)), N)
+  | eval(_, let_(_, _, _)) = raise SyntaxError "first arg in a 'let* tuple' must be a variable"
+  | eval(E, multiLet(bindings, M)) = if (not (hasDuplicates (map (fn (x,_) => x) bindings)))
+                                     then
+                                     let
+                                       fun addBindings (e, l) =
+                                          case l of [] => e
+                                                  | (V, N)::rest => case V of var x => addBindings(extend(e, x, eval(E, N)), rest) | _ => raise SyntaxError "first arg in a 'let tuple' must be a variable"
+                                     in
+                                       eval(addBindings(E, bindings), M)
+                                     end
+                                     else raise SyntaxError "there cannot be duplicates variables in the 'let' statemet, use 'let*' instead"
   | eval(E, lambda(var x, M)) = closure(var x, M, E)
   | eval(_, lambda(_, _)) = raise SyntaxError "first element in a list must be a function or operator"
   | eval(E, lambdaApp(M, N)) = case eval(E, M) of
-                             closure(var x, body, E') => eval(tuple(x, eval(E, N))::E', body)
+                             closure(var x, body, E') => eval(extend(E', x , eval(E, N)), body)
                            | closure(_,_,_) => raise InternalError "illegal closure instance"
                            | constVal _ => raise SyntaxError "cannot use a costant value as a function (it's possible too many args were given)"
 (*HELPER*)
-and applyOperator (E : env list, args : exp list, operator : string) = case args of [] => raise InternalError "cannot have empty list of args" | _ =>
+and applyOperator (E : enviroment, args : exp list, operator : string) = case args of [] => raise InternalError "cannot have empty list of args" | _ =>
   case operator of
     "+" => constVal (integer (foldl op+ 0 (map (fn x => extractInt (eval(E, x))) args)))
   | "*" => constVal (integer (foldl op* 1 (map (fn x => extractInt (eval(E, x))) args)))
@@ -112,7 +136,7 @@ fun parseSexp (s : string) : s_exp = case parseToken (tokenize s) of
                                      | (_, _) => raise SyntaxError "Extra Tokens after expression";
 
 (*helpers*)
-fun IntFromString (s : string): int option =
+fun intFromString (s : string): int option =
     let
         fun parseDigits [] acc = SOME acc
           | parseDigits (c::cs) acc =
@@ -128,6 +152,30 @@ fun IntFromString (s : string): int option =
           | cs => parseDigits cs 0
     end;
 
+fun expToString (const (integer n)) = (Int.toString n)
+  | expToString (const (boolean b)) = (Bool.toString b)
+  | expToString (var x) = x
+  | expToString (sum l) = "(+ " ^ (foldr (fn (x, acc) => x ^ " " ^ acc) ")" (map expToString l))
+  | expToString (prod l) = "(* " ^ (foldr op^ ")" (map expToString l))
+  | expToString (equals l) = "(= " ^ (foldr op^ ")" (map expToString l))
+  | expToString (greatOrEq l) = "(>= " ^ (foldr op^ ")" (map expToString l))
+  | expToString (lessThan l) = "(< " ^ (foldr op^ ")" (map expToString l))
+  | expToString (and_ l) = "(and " ^ (foldr op^ ")" (map expToString l))
+  | expToString (or l) = "(or " ^ (foldr op^ ")" (map expToString l))
+  | expToString (ifThenElse (M, N, O)) = "(if " ^ (expToString M) ^ (expToString N) ^ (expToString O) ^ ")"
+  | expToString (let_ (M, N, O)) = "(let* (" ^ (expToString M) ^ " " ^ (expToString N) ^ ") " ^ (expToString O) ^ ")"
+  | expToString (multiLet (l, M)) = "(let (" ^ (foldr op^ ")" (map (fn (x, y) => "(" ^ (expToString x) ^ " " ^ (expToString y) ^ ")") l)) ^ " " ^ (expToString M) ^ ")"
+  | expToString (lambda (M, N)) = "(lambda (" ^ (expToString M) ^ ")" ^ (expToString N) ^ ")"
+  | expToString (lambdaApp (M, N)) = "(" ^ (expToString M) ^ (expToString N) ^ ")"
+  | expToString _ = ""
+
+fun envToString emptyEnv = ""
+  | envToString (extention(E, s, v)) = envToString E ^ "(" ^ s ^ " : " ^ (valueToString v) ^ ")"
+and valueToString (constVal (integer n)) = "costant : " ^ Int.toString n
+  | valueToString (constVal (boolean b)) = "costant : " ^ Bool.toString b
+  | valueToString (closure (var x, body, E)) = "closure : [" ^ x ^ ", " ^ (expToString body) ^ ", {" ^ (envToString E) ^ "}]"
+  | valueToString (closure(_,_,_)) = raise InternalError "error in the closure"
+
 fun SexpList (Atom _) = NONE
   | SexpList (List l) = SOME l;
 
@@ -137,7 +185,7 @@ fun interpretSexp (List []) = raise SyntaxError "Empty List"
       (case s of
          "true" => const (boolean true)
        | "false" => const (boolean false)
-       | _ => (case IntFromString s of
+       | _ => (case intFromString s of
                  SOME n => const (integer n)
                | NONE   => var s))
   | interpretSexp (List (func :: args)) =
@@ -156,12 +204,30 @@ fun interpretSexp (List []) = raise SyntaxError "Empty List"
                | Atom "not" => if (length args = 1)
                                then not_ (interpretSexp (hd args))
                                else raise SyntaxError "the 'not' function takes only one argument"
+               | Atom "if" => if (length args = 3)
+                              then ifThenElse (interpretSexp (hd args), interpretSexp (hd (tl args)), interpretSexp (hd (tl (tl args))))
+                              else raise SyntaxError "the 'if' function requires 3 args : condition, then block, else block"
                | Atom "let" => if (length args = 2 andalso
                                    (case hd args of
                                       List bindings =>
                                         allTrue (map (fn binding => case SexpList binding of
                                                                     SOME l => length l = 2
                                                                   | NONE   => raise SyntaxError "first arg of a 'let' statement must be a list of tuples (variable, expression/constant)")
+                                                   bindings)
+                                    | Atom _ => false))
+                               then let
+                                      val bindings = (map (fn (List [x, v]) => (interpretSexp x, interpretSexp v) | _ => raise InternalError "error in let bindings") (valOf (SexpList (hd args))))
+                                      val block = hd (tl args)
+                                    in 
+                                      multiLet(bindings, interpretSexp block)
+                                    end
+                               else raise SyntaxError "error in the 'let' statement"
+               | Atom "let*" => if (length args = 2 andalso
+                                   (case hd args of
+                                      List bindings =>
+                                        allTrue (map (fn binding => case SexpList binding of
+                                                                    SOME l => length l = 2
+                                                                  | NONE   => raise SyntaxError "first arg of a 'let*' statement must be a list of tuples (variable, expression/constant)")
                                                    bindings)
                                     | Atom _ => false))
                                then let
@@ -174,7 +240,7 @@ fun interpretSexp (List []) = raise SyntaxError "Empty List"
                                             (interpretSexp block)
                                             bindings
                                     end
-                               else raise SyntaxError "error in the 'let' statement"
+                               else raise SyntaxError "error in the 'let*' statement"
                | Atom "lambda" => if (length args = 2 andalso
                                       (case hd args of
                                          List inputVars => allTrue (map (fn inputVar => case interpretSexp inputVar of var _ => true | _ => false)
@@ -194,9 +260,11 @@ fun interpretSexp (List []) = raise SyntaxError "Empty List"
 
 (*FINAL EXECUTION*)
 
-fun executeStr (program : string) : value = eval([], interpretSexp(parseSexp program));
+fun executeStr (program : string) : value = eval(emptyEnv, interpretSexp(parseSexp program));
 
-fun executeFile (path : string) : value =
+
+
+fun executeFile (path : string) =
     if String.isSuffix ".mylisp" path then
         let
             val instream = TextIO.openIn path
@@ -204,15 +272,21 @@ fun executeFile (path : string) : value =
                           handle exn => (TextIO.closeIn instream; raise exn)
             val () = TextIO.closeIn instream
         in
-            executeStr program
+            print ("\027[32mOUTPUT "^ path ^ " = " ^valueToString (executeStr program) ^ "\027[0m\n")
+            handle SyntaxError m   => print ("\027[31mSyntaxError: "^ m ^ "\027[0m\n")
+                 | InternalError m => print ("\027[31mInternalError: "^ m ^ "\027[0m\n")
+                 | exn => raise exn
         end
     else
         raise SyntaxError "Invalid file extension: expected a .mylisp file";
 
 (*---FINAL TEST---*)
 
+(*
 (*TEST 1 : *) executeStr "(let ((succ1 (lambda (x) (+ x 1))) (succ2 (lambda (x) (+ x 1))))  (= succ1 succ2))";
 
-(*TEST 2 : *) executeStr "(= (lambda (x) (+ x 1)) (lambda (x) (+ x 1)))";
+(*TEST 2 : *) executeStr "(if (or true (not (= (lambda (x) (+ x 1)) (lambda (x) (+ x 1))))) (+ 1 2) (+ 0))";
 
 (*TEST 3 : *) executeStr "(or false (not (= (lambda (x) (+ x 1)) (lambda (x) (+ x 1)))))";
+*)
+(*TEST 4 : *) executeFile "test.mylisp";
