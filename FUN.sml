@@ -7,6 +7,7 @@ datatype exp = emptyList
              | var of string
              | sum of exp list (*int args*)
              | prod of exp list (*int args*)
+             | modulus of exp * exp (*m mod n*)
              | equals of exp list (*args*)
              | greatOrEq of exp list (*int args*)
              | lessThan of exp list (*int args*)
@@ -69,7 +70,7 @@ fun SexpList (Atom _) = NONE
   | SexpList (List l) = SOME l;
 
 fun extractInt (constVal (integer k)) = k
-  | extractInt _ = raise SyntaxError "The '+', '*', '>', '<', '>=', '<=' functions require numerical values as arguments";
+  | extractInt _ = raise SyntaxError "The '+', '*', 'mod', '>', '<', '>=', '<=' functions require numerical values as arguments";
 
 fun extractBool (constVal (boolean k)) = k
   | extractBool _ = raise SyntaxError "The 'not', 'and', 'or' functions require boolean values as arguments";
@@ -126,6 +127,9 @@ fun interpretSexp (List []) = emptyList
          | _ => (case func of
                      Atom "+" => sum (map interpretSexp args)
                    | Atom "*" => prod (map interpretSexp args)
+                   | Atom "mod" => if (length args = 2)
+                                    then modulus(interpretSexp (hd args), interpretSexp (hd (tl args)))
+                                    else raise SyntaxError "the 'mod' statement requires 2 args"
                    | Atom "=" => equals (map interpretSexp args)
                    | Atom ">=" => greatOrEq (map interpretSexp args)
                    | Atom "<=" => greatOrEq (rev (map interpretSexp args))
@@ -220,6 +224,7 @@ fun eval(_, emptyList) = listVal []
                                         eval(E, var y)
   | eval(E, sum args) = applyOperator (E, args, "+")
   | eval(E, prod args) = applyOperator (E, args, "*")
+  | eval(E, modulus(M, N)) = constVal (integer ((extractInt(eval(E, M))) mod (extractInt(eval(E, N)))))
   | eval(E, equals args) = applyOperator (E, args, "=")
   | eval(E, greatOrEq args) = applyOperator (E, args, ">=")
   | eval(E, lessThan args) = applyOperator (E, args, "<")
