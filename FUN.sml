@@ -34,9 +34,9 @@ datatype environment = emptyEnv
                      | eagerextension of environment * string * value
                      | lazyextension of environment * (string * exp) list
 and      value = constVal of constant
+               | symbolVal of string
                | listVal of value list
-               | closure of exp * exp (*lambda (var,body)*) * environment (*environment of declaration*)
-               | quotedVal of s_exp;
+               | closure of exp * exp (*lambda (var,body)*) * environment (*environment of declaration*);
 
 fun extend (emptyEnv, s, v) = eagerextension (emptyEnv, s, v)
   | extend (eagerextension(E, s', v'), s, v) =
@@ -110,9 +110,13 @@ fun realFromString (s : string) : real option =
       val hasDotOrExp = List.exists (fn c => c = #"." orelse c = #"e") chars
       fun isValidRealChar c =
           Char.isDigit c orelse c = #"." orelse c = #"-" orelse c = #"+" orelse c = #"e"
+      fun reader [] = NONE
+        | reader (c::cs) = SOME (c, cs)
     in
       if hasDotOrExp andalso allTrue (map isValidRealChar chars) then
-        Real.fromString s
+        case Real.scan reader chars of
+            SOME (r, []) => SOME r
+          | _ => NONE
       else
         NONE
     end;
@@ -206,12 +210,9 @@ fun equalConstants (integer n1, integer n2) = n1 = n2
 fun equalValues (constVal c1, constVal c2) = equalConstants (c1, c2)
   | equalValues (listVal [], listVal []) = true
   | equalValues (listVal (h1::t1), listVal (h2::t2)) = equalValues (h1, h2) andalso equalValues (listVal t1, listVal t2)
-  | equalValues (quotedVal s1, quotedVal s2) = (s1 = s2)
+  | equalValues (symbolVal s1, symbolVal s2) = (s1 = s2)
   | equalValues _ = false;
-
-fun realToLispString (r : real) : string =
-    if r < 0.0 then "-" ^ Real.toString (~r)
-    else Real.toString r;
+    
 
 fun extractNumber (constVal (integer k)) = integer k
   | extractNumber (constVal (ratio r)) = ratio r
@@ -223,6 +224,17 @@ fun extractInt (constVal (integer k)) = k
 
 fun extractBool (constVal (boolean k)) = k
   | extractBool _ = raise SyntaxError "The 'not', 'and', 'or' functions require boolean values as arguments";
+
+fun constToString (integer n) =
+      if n < 0 then "-" ^ Int.toString (~n)
+      else Int.toString n
+  | constToString (boolean b) = Bool.toString b
+  | constToString (ratio (n, m)) =
+      if n < 0 then "-" ^ (Int.toString (~n)) ^ "/" ^ (Int.toString m)
+      else (Int.toString n) ^ "/" ^ (Int.toString m)
+  | constToString (realNum r) =
+      if r < 0.0 then "-" ^ Real.toString (~r)
+      else Real.toString r;
 
 (*PARSING*)
 fun tokenize (s : string) : string list =
@@ -471,21 +483,36 @@ fun eval(_, emptyList) = listVal []
       (case eval(E, M) of 
            listVal [] => raise SyntaxError "'car' used on an empty list"
          | listVal (h::_) => h
-         | quotedVal (List []) => raise SyntaxError "'car' used on an empty list"
-         | quotedVal (List (h::_)) => quotedVal h
          | _ => raise SyntaxError "cannot use 'car' on an atomic value")
   | eval(E, cdr M) =
       (case eval(E, M) of 
            listVal [] => raise SyntaxError "'cdr' used on an empty list"
          | listVal (_::r) => listVal r
-         | quotedVal (List []) => raise SyntaxError "'cdr' used on an empty list"
-         | quotedVal (List (_::r)) => quotedVal(List r)
          | _ => raise SyntaxError "cannot use 'cdr' on an atomic value")
-  | eval(_, quote S) = quotedVal S
+  | eval(_, quote S) =
+      let
+        fun sExpToValue (List l) = listVal (map sExpToValue l)
+          | sExpToValue (Atom s) =
+            (case s of
+                 "true" => constVal (boolean true)
+               | "false" => constVal (boolean false)
+               | _ => (case intFromString s of
+                           SOME n => constVal (integer n)
+                         | NONE   => (case ratioFromString s of
+                                          SOME (n, d) => constVal (normalizeRatio (n, d))
+                                        | NONE        => (case realFromString s of
+                                                              SOME r => constVal (realNum r)
+                                                            | NONE   => symbolVal s)))); 
+      in sExpToValue S
+      end
   | eval(E, eval_ M) =
-      (case eval(E, M) of
-           quotedVal S => eval(E, (interpretSexp S))
-         | _ => raise SyntaxError "first arg of a 'eval' statement must be a quoted value")
+      let
+        fun valueToSexp (constVal k) = Atom (constToString k)
+          | valueToSexp (symbolVal s) = Atom s
+          | valueToSexp (listVal l) = List (map valueToSexp l)
+          | valueToSexp (closure _) = raise SyntaxError "cannot 'eval' a closure directly";
+      in eval(E, interpretSexp (valueToSexp (eval(E, M))))
+      end
 
 (*HELPER*)
 and applyOperator (E : environment, args : exp list, operator : string) =
@@ -525,11 +552,10 @@ fun executeStr (program : string) : value = eval(emptyEnv, interpretSexp(parseSe
 fun sExptoString (Atom s) = s
   | sExptoString (List l) = "(" ^ (String.concatWith " " (map sExptoString l)) ^ ")"
 
+
+
 fun expToString emptyList = "()"
-  | expToString (const (integer n)) = Int.toString n
-  | expToString (const (boolean b)) = Bool.toString b
-  | expToString (const (ratio(n, m))) = (Int.toString n) ^ "/" ^ (Int.toString m)
-  | expToString (const (realNum r)) = realToLispString r
+  | expToString (const k) = constToString k
   | expToString (var x) = x
   | expToString (sum l) = "(+ " ^ (String.concatWith " " (map expToString l)) ^ ")"
   | expToString (prod l) = "(* " ^ (String.concatWith " " (map expToString l)) ^ ")"
@@ -556,16 +582,11 @@ fun expToString emptyList = "()"
 fun envToString emptyEnv = ""
   | envToString (eagerextension(E, s, v)) = envToString E ^ "(" ^ s ^ " : " ^ (#2 (valueToString v)) ^ ")"
   | envToString (lazyextension(E, bindings)) = envToString E ^ foldl (fn (x, acc) => x ^ " " ^ acc) "" (map (fn (s, M) => "(" ^ s ^ ":" ^ (expToString M) ^ ")") bindings)
-and valueToString (constVal (integer n)) = ("constant : ", Int.toString n)
-  | valueToString (constVal (boolean b)) = ("constant : ", Bool.toString b)
-  | valueToString (constVal (ratio (n, m))) = ("constant : ", (Int.toString n) ^ "/" ^ (Int.toString m))
-  | valueToString (constVal (realNum r)) = ("constant : ", realToLispString r)
+and valueToString (constVal k) = ("constant : ", constToString k)
   | valueToString (listVal l) = ("list : ", "(" ^ (String.concatWith " " (map (fn v => #2 (valueToString v)) l)) ^ ")")
   | valueToString (closure (var x, body, E)) = ("closure :", "[" ^ x ^ ", " ^ (expToString body) ^ ", {" ^ (envToString E) ^ "}]")
   | valueToString (closure(_, _, _)) = raise InternalError "error in the closure"
-  | valueToString (quotedVal (Atom s)) = ("symbol :", s)
-  | valueToString (quotedVal (List l)) = ("quoted list : ", "(" ^ (String.concatWith " " (map (fn v => #2 (valueToString v)) (map quotedVal l))) ^ ")")
-
+  | valueToString (symbolVal s) = ("symbol :", "'" ^ s)
 
 fun executeFile (path : string) =
     if String.isSuffix ".mylisp" path then
