@@ -17,6 +17,7 @@ datatype exp = emptyList
              | ifThenElse of exp (*bool arg*) * exp (*then block*) * exp (*else block*)             
              | let_ of exp (*declared var*) * exp (*assigned value*) * exp (*local block*)
              | multiLet of (exp * exp) list (*bindings*) * exp (*local block*)
+             | letRec of (exp * exp) list (*bindings*) * exp (*local block*)
              | lambda of exp (*input var*) * exp (*function body*)
              | lambdaApp of exp (*lambda function*) * exp (*argument*)
              | cons of exp (*head*) * exp (*rest*)
@@ -27,16 +28,39 @@ datatype exp = emptyList
 and s_exp = Atom of string | List of s_exp list;
 
 
-datatype enviroment = emptyEnv | extention of enviroment * string * value
+datatype environment = emptyEnv
+                    | eagerextension of environment * string * value
+                    | lazyextension of environment * (string * exp) list
 and      value = constVal of constant
                | listVal of value list
-               | closure of exp * exp (*lambda (var,body)*) * enviroment (*enviroment of declaration*)
+               | closure of exp * exp (*lambda (var,body)*) * environment (*environment of declaration*)
                | quotedVal of s_exp;
 
-fun extend (emptyEnv, s , v ) = extention (emptyEnv, s, v)
-  | extend (extention(E, s', v'), s, v) = if (s = s')
-                                          then extention (E, s, v)
-                                          else extention (extend(E, s, v), s', v')
+fun extend (emptyEnv, s, v) = eagerextension (emptyEnv, s, v)
+  | extend (eagerextension(E, s', v'), s, v) =
+      if (s = s')
+      then eagerextension (E, s, v)
+      else eagerextension (extend(E, s, v), s', v')
+  | extend (lazyextension(E, bindings), s, v) =
+      if List.exists (fn (s', _) => s = s') bindings
+      then eagerextension (lazyextension(extend(E, s, v), bindings), s, v)
+      else lazyextension (extend(E, s, v), bindings)
+
+fun recExtend (E, []) = E
+  | recExtend (E, bindings) =
+      let
+        val shadowedNames = map (fn (name, _) => name) bindings
+        fun removeVars emptyEnv = emptyEnv
+          | removeVars (eagerextension(env, s', v')) =
+              if List.exists (fn name => name = s') shadowedNames
+              then removeVars env
+              else eagerextension(removeVars env, s', v')
+          | removeVars (lazyextension(env, b)) =
+              lazyextension(removeVars env, b)
+        val E' = removeVars E
+      in
+        lazyextension(E', bindings)
+      end
 
 exception SyntaxError of string;
 exception InternalError of string;
@@ -90,9 +114,9 @@ fun tokenize (s : string) : string list =
 
 fun parseToken [] = raise SyntaxError "unexpected input end"
   | parseToken ("(" :: elements) = parseList elements
-  | parseToken (")" :: _) = raise SyntaxError "unexpected closing parentesis"
+  | parseToken (")" :: _) = raise SyntaxError "unexpected closing parenthesis"
   | parseToken (atom :: elements) = (Atom atom, elements)
-and parseList [] = raise SyntaxError "parentesis open but not closed"
+and parseList [] = raise SyntaxError "parenthesis open but not closed"
   | parseList (")" :: elements) = (List [], elements)
   | parseList tokens =
       let
@@ -123,7 +147,9 @@ fun interpretSexp (List []) = emptyList
                    | NONE   => var s))
   | interpretSexp (List (func :: args)) =
       (case args of
-           [] => raise SyntaxError "List without arguments"
+           [] => (case func of
+                    Atom "quote" => quote(List [])
+                  | _ => raise SyntaxError "List without arguments")
          | _ => (case func of
                      Atom "+" => sum (map interpretSexp args)
                    | Atom "*" => prod (map interpretSexp args)
@@ -148,7 +174,7 @@ fun interpretSexp (List []) = emptyList
                                             List bindings =>
                                               allTrue (map (fn binding => case SexpList binding of
                                                                               SOME l => length l = 2
-                                                                            | NONE   => raise SyntaxError "first arg of a 'let' statement must be a list of tuples (variable, expression/constant)")
+                                                                            | NONE   => raise SyntaxError "first arg of a 'let' statement must be a list of tuples (variable, expression)")
                                                            bindings)
                                           | Atom _ => false))
                                    then
@@ -164,7 +190,7 @@ fun interpretSexp (List []) = emptyList
                                              List bindings =>
                                                allTrue (map (fn binding => case SexpList binding of
                                                                                SOME l => length l = 2
-                                                                             | NONE   => raise SyntaxError "first arg of a 'let*' statement must be a list of tuples (variable, expression/constant)")
+                                                                             | NONE   => raise SyntaxError "first arg of a 'let*' statement must be a list of tuples (variable, expression)")
                                                             bindings)
                                            | Atom _ => false))
                                     then
@@ -180,11 +206,27 @@ fun interpretSexp (List []) = emptyList
                                               bindings
                                       end
                                     else raise SyntaxError "error in the 'let*' statement"
+                   | Atom "letrec" => if (length args = 2 andalso
+                                       (case hd args of
+                                            List bindings =>
+                                              allTrue (map (fn binding => case SexpList binding of
+                                                                              SOME l => length l = 2
+                                                                            | NONE   => raise SyntaxError "first arg of a 'letrec' statement must be a list of tuples (variable, lambda)")
+                                                           bindings)
+                                          | Atom _ => false))
+                                   then
+                                     let
+                                       val bindings = (map (fn (List [x, v]) => (interpretSexp x, interpretSexp v) | _ => raise InternalError "error in let bindings") (valOf (SexpList (hd args))))
+                                       val block = hd (tl args)
+                                     in 
+                                       letRec(bindings, interpretSexp block)
+                                     end
+                                   else raise SyntaxError "error in the 'letrec' statement"
                    | Atom "lambda" => if (length args = 2 andalso
                                           (case hd args of
-                                               List inputVars => allTrue (map (fn inputVar => case interpretSexp inputVar of var _ => true | _ => false)
+                                               List (inputVars as _::_) => allTrue (map (fn inputVar => case interpretSexp inputVar of var _ => true | _ => false)
                                                                               inputVars)
-                                             | Atom _ => false))
+                                             | _ => false))
                                       then
                                         let
                                           val inputVars = valOf (SexpList (hd args))
@@ -198,13 +240,13 @@ fun interpretSexp (List []) = emptyList
                    | Atom "cons" => if (length args = 2)
                                     then cons(interpretSexp (hd args), interpretSexp (hd (tl args)))
                                     else raise SyntaxError "the 'cons' statement requires 2 args"
-                   | Atom "list" => foldl cons emptyList (map interpretSexp args)
+                   | Atom "list" => foldr cons emptyList (map interpretSexp args)
                    | Atom "car" => if (length args = 1)
                                     then car(interpretSexp (hd args))
-                                    else raise SyntaxError "the 'cons' statement requires 1 arg"
+                                    else raise SyntaxError "the 'car' statement requires 1 arg"
                    | Atom "cdr" => if (length args = 1)
                                     then cdr(interpretSexp (hd args))
-                                    else raise SyntaxError "the 'cons' statement requires 1 arg"
+                                    else raise SyntaxError "the 'cdr' statement requires 1 arg"
                    | Atom "quote" => quote(List args)
                    | Atom "eval" => if (length args = 1)
                                     then eval_(interpretSexp (hd args))
@@ -218,10 +260,21 @@ fun interpretSexp (List []) = emptyList
 fun eval(_, emptyList) = listVal []
   | eval(_ , const k) = constVal k
   | eval(emptyEnv, var x) = raise SyntaxError("undeclared var :" ^ x)
-  | eval(extention(E, x, v), var y) = if (x = y) then
+  | eval(eagerextension(E, x, v), var y) = if (x = y) then
                                         v
                                       else
                                         eval(E, var y)
+  | eval(env as lazyextension(E, bindings), var y) =
+      let
+        fun lookup [] = eval(E, var y)
+          | lookup ((name, expr)::rest) =
+             if name = y then
+               eval(env, expr)
+             else
+               lookup rest
+      in
+         lookup bindings
+       end
   | eval(E, sum args) = applyOperator (E, args, "+")
   | eval(E, prod args) = applyOperator (E, args, "*")
   | eval(E, modulus(M, N)) = constVal (integer ((extractInt(eval(E, M))) mod (extractInt(eval(E, N)))))
@@ -235,8 +288,8 @@ fun eval(_, emptyList) = listVal []
                                             then eval(E, M)
                                             else eval(E, N))
   | eval(E, let_(var x, M, N)) = eval(extend(E, x , eval(E, M)), N)
-  | eval(_, let_(_, _, _)) = raise SyntaxError "first arg in a 'let* tuple' must be a variable"
-  | eval(E, multiLet(bindings, M)) = if (not (hasDuplicates (map (fn (x,_) => x) bindings)))
+  | eval(_, let_ _) = raise SyntaxError "first arg in a 'let* tuple' must be a variable"
+  | eval(E, multiLet(bindings, M)) = if (not (hasDuplicates (map (fn (V, _) => V) bindings)))
                                      then
                                        let
                                          fun addBindings (e, l) =
@@ -248,9 +301,19 @@ fun eval(_, emptyList) = listVal []
                                        in
                                          eval(addBindings(E, bindings), M)
                                        end
-                                     else raise SyntaxError "there cannot be duplicates variables in the 'let' statemet, use 'let*' instead"
+                                     else raise SyntaxError "there cannot be duplicates variables in the 'let' statement, use 'let*' instead"
+  | eval(E, letRec(bindings, M)) = if (not (hasDuplicates (map (fn (V, _) => V) bindings)))
+                                   then let
+                                          val validBindings = map (fn (V, F) =>
+                                                                                          (case (V, F) of (var x, lambda _) =>
+                                                                                            (x, F)
+                                                                                          | _ => raise SyntaxError "a 'letrec tuple' must be composed by a variable and a lambda function"))
+                                                                                        bindings
+                                        in eval(recExtend(E, validBindings), M)
+                                        end
+                                   else raise SyntaxError "there cannot be duplicates variables in the 'letrec' statement, use 'let*' instead"
   | eval(E, lambda(var x, M)) = closure(var x, M, E)
-  | eval(_, lambda(_, _)) = raise SyntaxError "first element in a list must be a function or operator"
+  | eval(_, lambda _) = raise SyntaxError "first element in a list must be a function or operator"
   | eval(E, lambdaApp(M, N)) = (case eval(E, M) of
                                    closure(var x, body, E') => eval(extend(E', x , eval(E, N)), body)
                                  | closure(_,_,_) => raise InternalError "illegal closure instance"
@@ -258,7 +321,7 @@ fun eval(_, emptyList) = listVal []
   | eval(E, cons(M, emptyList)) = listVal((eval(E, M)) :: [])
   | eval(E, cons(M, N)) = (case eval(E, N) of
                              listVal l => listVal((eval(E, M)) :: l)
-                           | _ => raise SyntaxError "the secong arg of a 'cons' statement should be a list value")
+                           | _ => raise SyntaxError "the second arg of a 'cons' statement should be a list value")
   | eval(E, car M) = (case eval(E, M) of 
                         listVal [] => raise SyntaxError "'car' used on an empty list"
                       | listVal (h::_) => h
@@ -277,7 +340,7 @@ fun eval(_, emptyList) = listVal []
                         | _ => raise SyntaxError "first arg of a 'eval' statement must be a quoted value")
 
 (*HELPER*)
-and applyOperator (E : enviroment, args : exp list, operator : string) =
+and applyOperator (E : environment, args : exp list, operator : string) =
     case args of
         [] => raise InternalError "cannot have empty list of args"
       | _ =>
@@ -309,32 +372,46 @@ and applyOperator (E : enviroment, args : exp list, operator : string) =
 (*FINAL EXECUTION*)
 fun executeStr (program : string) : value = eval(emptyEnv, interpretSexp(parseSexp program));
 
-fun expToString (const (integer n)) = (Int.toString n)
+fun sExptoString (Atom s) = s
+  | sExptoString (List l) ="( " ^ (String.concatWith " " (map sExptoString l)) ^ ")"
+
+fun expToString emptyList = "()"
+  | expToString (const (integer n)) = (Int.toString n)
   | expToString (const (boolean b)) = (Bool.toString b)
   | expToString (var x) = x
-  | expToString (sum l) = "(+ " ^ (foldr (fn (x, acc) => x ^ " " ^ acc) ")" (map expToString l))
-  | expToString (prod l) = "(* " ^ (foldr (fn (x, acc) => x ^ " " ^ acc) ")" (map expToString l))
-  | expToString (equals l) = "(= " ^ (foldr (fn (x, acc) => x ^ " " ^ acc) ")" (map expToString l))
-  | expToString (greatOrEq l) = "(>= " ^ (foldr (fn (x, acc) => x ^ " " ^ acc) ")" (map expToString l))
-  | expToString (lessThan l) = "(< " ^ (foldr op^ ")" (map expToString l))
-  | expToString (and_ l) = "(and " ^ (foldr (fn (x, acc) => x ^ " " ^ acc) ")" (map expToString l))
-  | expToString (or l) = "(or " ^ (foldr (fn (x, acc) => x ^ " " ^ acc) ")" (map expToString l))
+  | expToString (sum l) = "(+ " ^ (String.concatWith " " (map expToString l)) ^ ")"
+  | expToString (prod l) = "(* " ^ (String.concatWith " " (map expToString l)) ^ ")"
+  | expToString (modulus (M, N)) = "(mod " ^ (expToString M) ^ " " ^ (expToString N) ^ ")"
+  | expToString (equals l) = "(= " ^ (String.concatWith " " (map expToString l)) ^ ")"
+  | expToString (greatOrEq l) = "(>= " ^ (String.concatWith " " (map expToString l)) ^ ")"
+  | expToString (lessThan l) = "(< " ^ (String.concatWith " " (map expToString l)) ^ ")"
+  | expToString (and_ l) = "(and " ^ (String.concatWith " " (map expToString l)) ^ ")"
+  | expToString (or l) = "(or " ^ (String.concatWith " " (map expToString l)) ^ ")"
+  | expToString (not_ M) = "(not " ^ (expToString M) ^ ")"
   | expToString (ifThenElse (M, N, O)) = "(if " ^ (expToString M) ^ " " ^ (expToString N) ^ " " ^ (expToString O) ^ ")"
   | expToString (let_ (M, N, O)) = "(let* (" ^ (expToString M) ^ " " ^ (expToString N) ^ ") " ^ (expToString O) ^ ")"
-  | expToString (multiLet (l, M)) = "(let (" ^ (foldr op^ ")" (map (fn (x, y) => "(" ^ (expToString x) ^ " " ^ (expToString y) ^ ")") l)) ^ " " ^ (expToString M) ^ ")"
+  | expToString (multiLet (l, M)) = "(let (" ^ (String.concatWith " " (map (fn (x, y) => "(" ^ (expToString x) ^ " " ^ (expToString y) ^ ")") l)) ^ " " ^ (expToString M) ^ ")"
+  | expToString (letRec (l, M)) = "(letrec (" ^ (String.concatWith " " (map (fn (x, y) => "(" ^ (expToString x) ^ " " ^ (expToString y) ^ ")") l)) ^ " " ^ (expToString M) ^ ")"
   | expToString (lambda (M, N)) = "(lambda (" ^ (expToString M) ^ ")" ^ (expToString N) ^ ")"
   | expToString (lambdaApp (M, N)) = "(" ^ (expToString M) ^ " " ^ (expToString N) ^ ")"
-  | expToString _ = ""
+  | expToString (cons (M, N)) = "(cons " ^ (expToString M) ^ " " ^ (expToString N) ^ ")"
+  | expToString (car M) = "(car " ^ (expToString M) ^ ")"
+  | expToString (cdr M) = "(cdr " ^ (expToString M) ^ ")"
+  | expToString (quote S) = "(quote " ^ (sExptoString S) ^ ")"
+  | expToString (eval_ M) = "(eval " ^ (expToString M) ^ ")"
+
+
 
 fun envToString emptyEnv = ""
-  | envToString (extention(E, s, v)) = envToString E ^ "(" ^ s ^ " : " ^ (#2 (valueToString v)) ^ ")"
-and valueToString (constVal (integer n)) = ("costant : " , Int.toString n)
-  | valueToString (constVal (boolean b)) = ("costant : " , Bool.toString b)
-  | valueToString (listVal l) = ("list : (" , foldl (fn (x, acc) => x ^ " " ^ acc) ")" (map (fn v => #2 (valueToString v)) l))
+  | envToString (eagerextension(E, s, v)) = envToString E ^ "(" ^ s ^ " : " ^ (#2 (valueToString v)) ^ ")"
+  | envToString (lazyextension(E, bindings)) = envToString E ^ foldl (fn (x, acc) => x ^ " " ^ acc) "" (map (fn (s, M) => "(" ^ s ^ ":" ^ (expToString M) ^ ")") bindings)
+and valueToString (constVal (integer n)) = ("constant : " , Int.toString n)
+  | valueToString (constVal (boolean b)) = ("constant : " , Bool.toString b)
+  | valueToString (listVal l) = ("list : ", "(" ^ (String.concatWith " " (map (fn v => #2 (valueToString v)) l)) ^ ")")
   | valueToString (closure (var x, body, E)) = ("closure :" , "[" ^ x ^ ", " ^ (expToString body) ^ ", {" ^ (envToString E) ^ "}]")
   | valueToString (closure(_,_,_)) = raise InternalError "error in the closure"
   | valueToString (quotedVal (Atom s)) = ("symbol :" , s )
-  | valueToString (quotedVal (List l)) = ("list : (" , foldl (fn (x, acc) => x ^ " " ^ acc) ")" (map (fn v => #2 (valueToString v)) (map quotedVal l)))
+  | valueToString (quotedVal (List l)) = ("quoted list : " , "(" ^ (String.concatWith " " (map (fn v => #2 (valueToString v)) (map quotedVal l))) ^ ")")
 
 
 
@@ -352,7 +429,7 @@ fun executeFile (path : string) =
              | exn => raise exn
       end
     else
-      print "\027[31mFileError: expected a .mylisp extention\027[0m\n";
+      print "\027[31mFileError: expected a .mylisp extension\027[0m\n";
 
 (*---FINAL TEST---*)
 executeFile "test.mylisp";
