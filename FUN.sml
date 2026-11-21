@@ -1,7 +1,8 @@
 (*SINTASSI ASTRATTA*)
 datatype constant = integer of int
                   | boolean of bool
-                  | ratio of int * int;
+                  | ratio of int * int
+                  | realNum of real;
 
 datatype exp = emptyList
              | const of constant
@@ -30,8 +31,8 @@ and s_exp = Atom of string | List of s_exp list;
 
 
 datatype environment = emptyEnv
-                    | eagerextension of environment * string * value
-                    | lazyextension of environment * (string * exp) list
+                     | eagerextension of environment * string * value
+                     | lazyextension of environment * (string * exp) list
 and      value = constVal of constant
                | listVal of value list
                | closure of exp * exp (*lambda (var,body)*) * environment (*environment of declaration*)
@@ -83,6 +84,18 @@ fun intFromString (s : string): int option =
         | cs => parseDigits cs 0
     end;
 
+fun allTrue (l : bool list) = (foldl (fn (x, acc) => x andalso acc) true l);
+
+fun atLeastOneTrue (l : bool list) = (foldl (fn (x, acc) => x orelse acc) false l);
+
+fun hasDuplicates l =
+    case l of
+        [] => false
+      | h::rest => List.exists (fn x => x = h) rest orelse hasDuplicates rest
+
+fun sExpList (Atom _) = NONE
+  | sExpList (List l) = SOME l;
+
 fun ratioFromString (s : string) : (int * int) option =
     case String.fields (fn c => c = #"/") s of
         [numStr, denStr] =>
@@ -91,16 +104,18 @@ fun ratioFromString (s : string) : (int * int) option =
              | _ => NONE)
       | _ => NONE;
 
-fun allTrue (l : bool list) = (foldl (fn (x, acc) => x andalso acc) true l);
-
-fun atLeastOneTrue (l : bool list) = (foldl (fn (x, acc) => x orelse acc) false l);
-
-fun hasDuplicates l = case l of
-                          [] => false
-                        | h::rest => List.exists (fn x => x = h) rest orelse hasDuplicates rest
-
-fun sExpList (Atom _) = NONE
-  | sExpList (List l) = SOME l;
+fun realFromString (s : string) : real option =
+    let
+      val chars = String.explode s
+      val hasDotOrExp = List.exists (fn c => c = #"." orelse c = #"e") chars
+      fun isValidRealChar c =
+          Char.isDigit c orelse c = #"." orelse c = #"-" orelse c = #"+" orelse c = #"e"
+    in
+      if hasDotOrExp andalso allTrue (map isValidRealChar chars) then
+        Real.fromString s
+      else
+        NONE
+    end;
 
 fun gcd (a : int, 0) = Int.abs a
   | gcd (a : int, b : int) = gcd (b, a mod b);
@@ -121,7 +136,13 @@ fun normalizeRatio (_, 0) = raise SyntaxError "division by zero in ratio"
 
 fun toPair (integer n) = (n, 1)
   | toPair (ratio (n, d)) = (n, d)
+  | toPair (realNum _) = raise InternalError "numerical arguments required in 'ToPair'"
   | toPair (boolean _) = raise InternalError "numerical arguments required in 'ToPair'";
+
+fun toReal (integer n) = Real.fromInt n
+  | toReal (ratio (n, d)) = (Real.fromInt n) / (Real.fromInt d)
+  | toReal (realNum r) = r
+  | toReal (boolean _) = raise InternalError "numerical argument required in 'toReal'";
 
 fun addRatio (c1 : constant, c2 : constant) : constant =
     let
@@ -144,8 +165,57 @@ fun prodRatio (c1 : constant, c2 : constant) : constant =
       normalizeRatio ((n1 div g1) * (n2 div g2), (d1 div g2) * (d2 div g1))
     end;
 
+fun addNumber (realNum r1, c2) = realNum (r1 + toReal c2)
+  | addNumber (c1, realNum r2) = realNum (toReal c1 + r2)
+  | addNumber (c1, c2) = addRatio (c1, c2);
+
+fun prodNumber (realNum r1, c2) = realNum (r1 * toReal c2)
+  | prodNumber (c1, realNum r2) = realNum (toReal c1 * r2)
+  | prodNumber (c1, c2) = prodRatio (c1, c2);
+
+fun geNumber (realNum r1, c2) = r1 >= toReal c2
+  | geNumber (c1, realNum r2) = toReal c1 >= r2
+  | geNumber (c1, c2) =
+      let
+        val (n1, d1) = toPair c1
+        val (n2, d2) = toPair c2
+      in
+        n1 * d2 >= n2 * d1
+      end;
+
+fun ltNumber (realNum r1, c2) = r1 < toReal c2
+  | ltNumber (c1, realNum r2) = toReal c1 < r2
+  | ltNumber (c1, c2) =
+      let
+        val (n1, d1) = toPair c1
+        val (n2, d2) = toPair c2
+      in
+        n1 * d2 < n2 * d1
+      end;
+
+fun equalConstants (integer n1, integer n2) = n1 = n2
+  | equalConstants (boolean b1, boolean b2) = b1 = b2
+  | equalConstants (ratio (n1, d1), ratio (n2, d2)) = n1 = n2 andalso d1 = d2
+  | equalConstants (realNum r1, c2 as integer _) = Real.== (r1, toReal c2)
+  | equalConstants (realNum r1, c2 as ratio _) = Real.== (r1, toReal c2)
+  | equalConstants (realNum r1, c2 as realNum _) = Real.== (r1, toReal c2)
+  | equalConstants (c1 as integer _, realNum r2) = Real.== (toReal c1, r2)
+  | equalConstants (c1 as ratio _, realNum r2) = Real.== (toReal c1, r2)
+  | equalConstants _ = false;
+
+fun equalValues (constVal c1, constVal c2) = equalConstants (c1, c2)
+  | equalValues (listVal [], listVal []) = true
+  | equalValues (listVal (h1::t1), listVal (h2::t2)) = equalValues (h1, h2) andalso equalValues (listVal t1, listVal t2)
+  | equalValues (quotedVal s1, quotedVal s2) = (s1 = s2)
+  | equalValues _ = false;
+
+fun realToLispString (r : real) : string =
+    if r < 0.0 then "-" ^ Real.toString (~r)
+    else Real.toString r;
+
 fun extractNumber (constVal (integer k)) = integer k
   | extractNumber (constVal (ratio r)) = ratio r
+  | extractNumber (constVal (realNum r)) = realNum r
   | extractNumber _ = raise SyntaxError "The '+', '*', '>', '<', '>=', '<=' functions require numerical values as arguments";
 
 fun extractInt (constVal (integer k)) = k
@@ -195,8 +265,6 @@ fun parseSexp (s : string) : s_exp =
       | (_, _) => raise SyntaxError "Extra Tokens after expression";
 
 
-
-
 (*INTEPRETER*)
 fun interpretSexp (List []) = emptyList
   | interpretSexp (Atom s) =
@@ -206,8 +274,10 @@ fun interpretSexp (List []) = emptyList
          | _ => (case intFromString s of
                      SOME n => const (integer n)
                    | NONE   => (case ratioFromString s of
-                                   SOME (n, m) => const (ratio (n, m))
-                                 | NONE   => var s)))
+                                    SOME (n, d) => const (normalizeRatio (n, d))
+                                  | NONE        => (case realFromString s of
+                                                        SOME r => const (realNum r)
+                                                      | NONE   => var s))))
   | interpretSexp (List (func :: args)) =
       (case args of
            [] => raise SyntaxError "List without arguments"
@@ -215,8 +285,8 @@ fun interpretSexp (List []) = emptyList
                      Atom "+" => sum (map interpretSexp args)
                    | Atom "*" => prod (map interpretSexp args)
                    | Atom "mod" => if (length args = 2)
-                                    then modulus(interpretSexp (hd args), interpretSexp (hd (tl args)))
-                                    else raise SyntaxError "the 'mod' statement requires 2 args"
+                                   then modulus(interpretSexp (hd args), interpretSexp (hd (tl args)))
+                                   else raise SyntaxError "the 'mod' statement requires 2 args"
                    | Atom "=" => equals (map interpretSexp args)
                    | Atom ">=" => greatOrEq (map interpretSexp args)
                    | Atom "<=" => greatOrEq (rev (map interpretSexp args))
@@ -268,25 +338,26 @@ fun interpretSexp (List []) = emptyList
                                       end
                                     else raise SyntaxError "error in the 'let*' statement"
                    | Atom "letrec" => if (length args = 2 andalso
-                                       (case hd args of
-                                            List bindings =>
-                                              allTrue (map (fn binding => case sExpList binding of
-                                                                              SOME l => length l = 2
-                                                                            | NONE   => raise SyntaxError "first arg of a 'letrec' statement must be a list of tuples (variable, lambda)")
-                                                           bindings)
-                                          | Atom _ => false))
-                                   then
-                                     let
-                                       val bindings = (map (fn (List [x, v]) => (interpretSexp x, interpretSexp v) | _ => raise InternalError "error in let bindings") (valOf (sExpList (hd args))))
-                                       val block = hd (tl args)
-                                     in 
-                                       letRec(bindings, interpretSexp block)
-                                     end
-                                   else raise SyntaxError "error in the 'letrec' statement"
+                                          (case hd args of
+                                               List bindings =>
+                                                 allTrue (map (fn binding => case sExpList binding of
+                                                                                 SOME l => length l = 2
+                                                                               | NONE   => raise SyntaxError "first arg of a 'letrec' statement must be a list of tuples (variable, lambda)")
+                                                              bindings)
+                                             | Atom _ => false))
+                                      then
+                                        let
+                                          val bindings = (map (fn (List [x, v]) => (interpretSexp x, interpretSexp v) | _ => raise InternalError "error in let bindings") (valOf (sExpList (hd args))))
+                                          val block = hd (tl args)
+                                        in 
+                                          letRec(bindings, interpretSexp block)
+                                        end
+                                      else raise SyntaxError "error in the 'letrec' statement"
                    | Atom "lambda" => if (length args = 2 andalso
                                           (case hd args of
-                                               List (inputVars as _::_) => allTrue (map (fn inputVar => case interpretSexp inputVar of var _ => true | _ => false)
-                                                                              inputVars)
+                                               List (inputVars as _::_) =>
+                                                 allTrue (map (fn inputVar => case interpretSexp inputVar of var _ => true | _ => false)
+                                                              inputVars)
                                              | _ => false))
                                       then
                                         let
@@ -303,11 +374,11 @@ fun interpretSexp (List []) = emptyList
                                     else raise SyntaxError "the 'cons' statement requires 2 args"
                    | Atom "list" => foldr cons emptyList (map interpretSexp args)
                    | Atom "car" => if (length args = 1)
-                                    then car(interpretSexp (hd args))
-                                    else raise SyntaxError "the 'car' statement requires 1 arg"
+                                   then car(interpretSexp (hd args))
+                                   else raise SyntaxError "the 'car' statement requires 1 arg"
                    | Atom "cdr" => if (length args = 1)
-                                    then cdr(interpretSexp (hd args))
-                                    else raise SyntaxError "the 'cdr' statement requires 1 arg"
+                                   then cdr(interpretSexp (hd args))
+                                   else raise SyntaxError "the 'cdr' statement requires 1 arg"
                    | Atom "quote" => if (length args = 1)
                                      then quote(hd args)
                                      else raise SyntaxError "the 'quote' statement requires 1 arg"
@@ -317,27 +388,28 @@ fun interpretSexp (List []) = emptyList
                    | _ => foldl (fn (arg : s_exp, e : exp) => lambdaApp (e, (interpretSexp arg)))
                                 (interpretSexp func)
                                 args));
-                    
+
 
 (*REGOLE DI INFERENZA*)
 fun eval(_, emptyList) = listVal []
-  | eval(_ , const k) = constVal k
+  | eval(_, const k) = constVal k
   | eval(emptyEnv, var x) = raise SyntaxError("undeclared var :" ^ x)
-  | eval(eagerextension(E, x, v), var y) = if (x = y) then
-                                        v
-                                      else
-                                        eval(E, var y)
+  | eval(eagerextension(E, x, v), var y) =
+      if (x = y) then
+        v
+      else
+        eval(E, var y)
   | eval(env as lazyextension(E, bindings), var y) =
       let
         fun lookup [] = eval(E, var y)
           | lookup ((name, expr)::rest) =
-             if name = y then
-               eval(env, expr)
-             else
-               lookup rest
+              if name = y then
+                eval(env, expr)
+              else
+                lookup rest
       in
-         lookup bindings
-       end
+        lookup bindings
+      end
   | eval(E, sum args) = applyOperator (E, args, "+")
   | eval(E, prod args) = applyOperator (E, args, "*")
   | eval(E, modulus(M, N)) = constVal (integer ((extractInt(eval(E, M))) mod (extractInt(eval(E, N)))))
@@ -347,60 +419,73 @@ fun eval(_, emptyList) = listVal []
   | eval(E, and_ args) = applyOperator (E, args, "andalso")
   | eval(E, or args) = applyOperator (E, args, "orelse")
   | eval(E, not_ arg) = constVal (boolean (not (extractBool (eval (E, arg)))))
-  | eval(E, ifThenElse(condition, M, N)) = (if extractBool (eval (E, condition))
-                                            then eval(E, M)
-                                            else eval(E, N))
-  | eval(E, let_(var x, M, N)) = eval(extend(E, x , eval(E, M)), N)
+  | eval(E, ifThenElse(condition, M, N)) =
+      if extractBool (eval (E, condition))
+      then eval(E, M)
+      else eval(E, N)
+  | eval(E, let_(var x, M, N)) = eval(extend(E, x, eval(E, M)), N)
   | eval(_, let_ _) = raise SyntaxError "first arg in a 'let* tuple' must be a variable"
-  | eval(E, multiLet(bindings, M)) = if (not (hasDuplicates (map (fn (V, _) => V) bindings)))
-                                     then
-                                       let
-                                         fun addBindings (e, l) =
-                                             case l of
-                                                 [] => e
-                                               | (V, N)::rest => case V of
-                                                                     var x => addBindings(extend(e, x, eval(E, N)), rest)
-                                                                   | _ => raise SyntaxError "first arg in a 'let tuple' must be a variable"
-                                       in
-                                         eval(addBindings(E, bindings), M)
-                                       end
-                                     else raise SyntaxError "there cannot be duplicates variables in the 'let' statement, use 'let*' instead"
-  | eval(E, letRec(bindings, M)) = if (not (hasDuplicates (map (fn (V, _) => V) bindings)))
-                                   then let
-                                          val validBindings = map (fn (V, F) =>
-                                                                                          (case (V, F) of (var x, lambda _) =>
-                                                                                            (x, F)
-                                                                                          | _ => raise SyntaxError "a 'letrec tuple' must be composed by a variable and a lambda function"))
-                                                                                        bindings
-                                        in eval(recExtend(E, validBindings), M)
-                                        end
-                                   else raise SyntaxError "there cannot be duplicates variables in the 'letrec' statement, use 'let*' instead"
+  | eval(E, multiLet(bindings, M)) =
+      let
+        val varNames = map (fn (var x, _) => x
+                             | _ => raise SyntaxError "first arg in a 'let tuple' must be a variable") bindings
+      in
+        if (not (hasDuplicates varNames))
+        then
+          let
+            fun addBindings (e, l) =
+                case l of
+                    [] => e
+                  | (var x, N)::rest => addBindings(extend(e, x, eval(E, N)), rest)
+                  | _ => raise SyntaxError "first arg in a 'let tuple' must be a variable"
+          in
+            eval(addBindings(E, bindings), M)
+          end
+        else raise SyntaxError "there cannot be duplicates variables in the 'let' statement, use 'let*' instead"
+      end
+  | eval(E, letRec(bindings, M)) =
+      let
+        val validBindings = map (fn (V, F) =>
+                                   (case (V, F) of
+                                        (var x, lambda _) => (x, F)
+                                      | _ => raise SyntaxError "a 'letrec tuple' must be composed by a variable and a lambda function"))
+                                bindings
+      in
+        if (not (hasDuplicates (map (fn (x, _) => x) validBindings)))
+        then eval(recExtend(E, validBindings), M)
+        else raise SyntaxError "there cannot be duplicates variables in the 'letrec' statement, use 'let*' instead"
+      end
   | eval(E, lambda(var x, M)) = closure(var x, M, E)
   | eval(_, lambda _) = raise SyntaxError "first element in a list must be a function or operator"
-  | eval(E, lambdaApp(M, N)) = (case eval(E, M) of
-                                   closure(var x, body, E') => eval(extend(E', x , eval(E, N)), body)
-                                 | closure(_,_,_) => raise InternalError "illegal closure instance"
-                                 | _ => raise SyntaxError "the first element of a list must be a function (it's possible too many args were given)")
+  | eval(E, lambdaApp(M, N)) =
+      (case eval(E, M) of
+           closure(var x, body, E') => eval(extend(E', x, eval(E, N)), body)
+         | closure(_, _, _) => raise InternalError "illegal closure instance"
+         | _ => raise SyntaxError "the first element of a list must be a function (it's possible too many args were given)")
   | eval(E, cons(M, emptyList)) = listVal((eval(E, M)) :: [])
-  | eval(E, cons(M, N)) = (case eval(E, N) of
-                             listVal l => listVal((eval(E, M)) :: l)
-                           | _ => raise SyntaxError "the second arg of a 'cons' statement should be a list value")
-  | eval(E, car M) = (case eval(E, M) of 
-                        listVal [] => raise SyntaxError "'car' used on an empty list"
-                      | listVal (h::_) => h
-                      | quotedVal (List []) => raise SyntaxError "'car' used on an empty list"
-                      | quotedVal (List (h::_)) => quotedVal h
-                      | _ => raise SyntaxError "cannot use 'car' on an atomic value")
-  | eval(E, cdr M) = (case eval(E, M) of 
-                        listVal [] => raise SyntaxError "'cdr' used on an empty list"
-                      | listVal (_::r) => listVal r
-                      | quotedVal (List []) => raise SyntaxError "'cdr' used on an empty list"
-                      | quotedVal (List (_::r)) => quotedVal(List r)
-                      | _ => raise SyntaxError "cannot use 'cdr' on an atomic value")
+  | eval(E, cons(M, N)) =
+      (case eval(E, N) of
+           listVal l => listVal((eval(E, M)) :: l)
+         | _ => raise SyntaxError "the second arg of a 'cons' statement should be a list value")
+  | eval(E, car M) =
+      (case eval(E, M) of 
+           listVal [] => raise SyntaxError "'car' used on an empty list"
+         | listVal (h::_) => h
+         | quotedVal (List []) => raise SyntaxError "'car' used on an empty list"
+         | quotedVal (List (h::_)) => quotedVal h
+         | _ => raise SyntaxError "cannot use 'car' on an atomic value")
+  | eval(E, cdr M) =
+      (case eval(E, M) of 
+           listVal [] => raise SyntaxError "'cdr' used on an empty list"
+         | listVal (_::r) => listVal r
+         | quotedVal (List []) => raise SyntaxError "'cdr' used on an empty list"
+         | quotedVal (List (_::r)) => quotedVal(List r)
+         | _ => raise SyntaxError "cannot use 'cdr' on an atomic value")
   | eval(_, quote S) = quotedVal S
-  | eval(E, eval_ M) = (case eval(E, M) of
-                          quotedVal S => eval(E, (interpretSexp S))
-                        | _ => raise SyntaxError "first arg of a 'eval' statement must be a quoted value")
+  | eval(E, eval_ M) =
+      (case eval(E, M) of
+           quotedVal S => eval(E, (interpretSexp S))
+         | _ => raise SyntaxError "first arg of a 'eval' statement must be a quoted value")
 
 (*HELPER*)
 and applyOperator (E : environment, args : exp list, operator : string) =
@@ -408,36 +493,24 @@ and applyOperator (E : environment, args : exp list, operator : string) =
         [] => raise InternalError "cannot have empty list of args"
       | _ =>
           case operator of
-              "+" => constVal (foldl addRatio (integer 0) (map (fn x => extractNumber (eval(E, x))) args))
-            | "*" => constVal (foldl prodRatio (integer 1) (map (fn x => extractNumber (eval(E, x))) args))
-            | "=" => constVal (boolean (allTrue (map (fn x => (eval(E, (hd args)) = (eval(E, x)))) args)))
+              "+" => constVal (foldl addNumber (integer 0) (map (fn x => extractNumber (eval(E, x))) args))
+            | "*" => constVal (foldl prodNumber (integer 1) (map (fn x => extractNumber (eval(E, x))) args))
+            | "=" => constVal (boolean (allTrue (map (fn x => equalValues (eval(E, (hd args)), eval(E, x))) args)))
             | ">=" => let
-                        fun geNumber (c1 : constant, c2 : constant) : bool =
-                          let
-                            val (n1, d1) = toPair c1
-                            val (n2, d2) = toPair c2
-                          in
-                            n1 * d2 >= n2 * d1
-                          end;
-                        fun ge (l : constant list) = case l of
-                                                         [] => raise InternalError "error in func ge"
-                                                       | _::[] => [true]
-                                                       | head::rest => geNumber (head, hd rest) :: ge rest
+                        fun ge (l : constant list) =
+                            case l of
+                                [] => raise InternalError "error in func ge"
+                              | _::[] => [true]
+                              | head::rest => geNumber (head, hd rest) :: ge rest
                       in
                         constVal (boolean (allTrue (ge (map (fn x => extractNumber (eval(E, x))) args))))
                       end
             | "<" => let
-                       fun ltNumber (c1 : constant, c2 : constant) : bool =
-                          let
-                            val (n1, d1) = toPair c1
-                            val (n2, d2) = toPair c2
-                          in
-                            n1 * d2 < n2 * d1
-                          end;
-                       fun lt (l : constant list) = case l of
-                                                        [] => raise InternalError "error in func lt"
-                                                      | _::[] => [true]
-                                                      | head::rest => ltNumber (head, hd rest) :: lt rest
+                       fun lt (l : constant list) =
+                           case l of
+                               [] => raise InternalError "error in func lt"
+                             | _::[] => [true]
+                             | head::rest => ltNumber (head, hd rest) :: lt rest
                      in
                        constVal (boolean (allTrue (lt (map (fn x => extractNumber (eval(E, x))) args))))
                      end
@@ -450,12 +523,13 @@ and applyOperator (E : environment, args : exp list, operator : string) =
 fun executeStr (program : string) : value = eval(emptyEnv, interpretSexp(parseSexp program));
 
 fun sExptoString (Atom s) = s
-  | sExptoString (List l) ="( " ^ (String.concatWith " " (map sExptoString l)) ^ ")"
+  | sExptoString (List l) = "(" ^ (String.concatWith " " (map sExptoString l)) ^ ")"
 
 fun expToString emptyList = "()"
   | expToString (const (integer n)) = Int.toString n
   | expToString (const (boolean b)) = Bool.toString b
   | expToString (const (ratio(n, m))) = (Int.toString n) ^ "/" ^ (Int.toString m)
+  | expToString (const (realNum r)) = realToLispString r
   | expToString (var x) = x
   | expToString (sum l) = "(+ " ^ (String.concatWith " " (map expToString l)) ^ ")"
   | expToString (prod l) = "(* " ^ (String.concatWith " " (map expToString l)) ^ ")"
@@ -479,19 +553,18 @@ fun expToString emptyList = "()"
   | expToString (eval_ M) = "(eval " ^ (expToString M) ^ ")"
 
 
-
 fun envToString emptyEnv = ""
   | envToString (eagerextension(E, s, v)) = envToString E ^ "(" ^ s ^ " : " ^ (#2 (valueToString v)) ^ ")"
   | envToString (lazyextension(E, bindings)) = envToString E ^ foldl (fn (x, acc) => x ^ " " ^ acc) "" (map (fn (s, M) => "(" ^ s ^ ":" ^ (expToString M) ^ ")") bindings)
-and valueToString (constVal (integer n)) = ("constant : " , Int.toString n)
-  | valueToString (constVal (boolean b)) = ("constant : " , Bool.toString b)
-  | valueToString (constVal (ratio (n, m))) = ("constant : " , (Int.toString n) ^ "/" ^ (Int.toString m))
+and valueToString (constVal (integer n)) = ("constant : ", Int.toString n)
+  | valueToString (constVal (boolean b)) = ("constant : ", Bool.toString b)
+  | valueToString (constVal (ratio (n, m))) = ("constant : ", (Int.toString n) ^ "/" ^ (Int.toString m))
+  | valueToString (constVal (realNum r)) = ("constant : ", realToLispString r)
   | valueToString (listVal l) = ("list : ", "(" ^ (String.concatWith " " (map (fn v => #2 (valueToString v)) l)) ^ ")")
-  | valueToString (closure (var x, body, E)) = ("closure :" , "[" ^ x ^ ", " ^ (expToString body) ^ ", {" ^ (envToString E) ^ "}]")
-  | valueToString (closure(_,_,_)) = raise InternalError "error in the closure"
-  | valueToString (quotedVal (Atom s)) = ("symbol :" , s )
-  | valueToString (quotedVal (List l)) = ("quoted list : " , "(" ^ (String.concatWith " " (map (fn v => #2 (valueToString v)) (map quotedVal l))) ^ ")")
-
+  | valueToString (closure (var x, body, E)) = ("closure :", "[" ^ x ^ ", " ^ (expToString body) ^ ", {" ^ (envToString E) ^ "}]")
+  | valueToString (closure(_, _, _)) = raise InternalError "error in the closure"
+  | valueToString (quotedVal (Atom s)) = ("symbol :", s)
+  | valueToString (quotedVal (List l)) = ("quoted list : ", "(" ^ (String.concatWith " " (map (fn v => #2 (valueToString v)) (map quotedVal l))) ^ ")")
 
 
 fun executeFile (path : string) =
@@ -502,9 +575,9 @@ fun executeFile (path : string) =
                       handle exn => (TextIO.closeIn instream; raise exn)
         val () = TextIO.closeIn instream
       in
-        print ("\027[32mOUTPUT "^ path ^ " = " ^ op ^ (valueToString (executeStr program)) ^ "\027[0m\n")
-        handle SyntaxError m   => print ("\027[31mSyntaxError: "^ m ^ "\027[0m\n")
-             | InternalError m => print ("\027[31mInternalError: "^ m ^ "\027[0m\n")
+        print ("\027[32mOUTPUT " ^ path ^ " = " ^ op ^ (valueToString (executeStr program)) ^ "\027[0m\n")
+        handle SyntaxError m   => print ("\027[31mSyntaxError: " ^ m ^ "\027[0m\n")
+             | InternalError m => print ("\027[31mInternalError: " ^ m ^ "\027[0m\n")
              | exn => raise exn
       end
     else
