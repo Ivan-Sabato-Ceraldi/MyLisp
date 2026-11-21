@@ -106,6 +106,7 @@ fun tokenize (s : string) : string list =
       fun pad [] = []
         | pad (#"(" :: rest) = #" " :: #"(" :: #" " :: pad rest
         | pad (#")" :: rest) = #" " :: #")" :: #" " :: pad rest
+        | pad (#"'" :: rest) = #" " :: #"'" :: #" " :: pad rest
         | pad (c :: rest) = c :: pad rest
       val padded = String.implode(pad((map Char.toLower (String.explode s)) @ [#" "]))
     in
@@ -113,6 +114,12 @@ fun tokenize (s : string) : string list =
     end;
 
 fun parseToken [] = raise SyntaxError "unexpected input end"
+  | parseToken ("'" :: elements) =
+      let
+        val (quotedExpr, rest) = parseToken elements
+      in
+        (List [Atom "quote", quotedExpr], rest)
+      end
   | parseToken ("(" :: elements) = parseList elements
   | parseToken (")" :: _) = raise SyntaxError "unexpected closing parenthesis"
   | parseToken (atom :: elements) = (Atom atom, elements)
@@ -147,9 +154,7 @@ fun interpretSexp (List []) = emptyList
                    | NONE   => var s))
   | interpretSexp (List (func :: args)) =
       (case args of
-           [] => (case func of
-                    Atom "quote" => quote(List [])
-                  | _ => raise SyntaxError "List without arguments")
+           [] => raise SyntaxError "List without arguments"
          | _ => (case func of
                      Atom "+" => sum (map interpretSexp args)
                    | Atom "*" => prod (map interpretSexp args)
@@ -247,7 +252,9 @@ fun interpretSexp (List []) = emptyList
                    | Atom "cdr" => if (length args = 1)
                                     then cdr(interpretSexp (hd args))
                                     else raise SyntaxError "the 'cdr' statement requires 1 arg"
-                   | Atom "quote" => quote(List args)
+                   | Atom "quote" => if (length args = 1)
+                                     then quote(hd args)
+                                     else raise SyntaxError "the 'quote' statement requires 1 arg"
                    | Atom "eval" => if (length args = 1)
                                     then eval_(interpretSexp (hd args))
                                     else raise SyntaxError "the 'eval' statement requires 1 arg"
