@@ -1,6 +1,7 @@
 (*SINTASSI ASTRATTA*)
 datatype constant = integer of int
-                  | boolean of bool;
+                  | boolean of bool
+                  | ratio of int * int;
 
 datatype exp = emptyList
              | const of constant
@@ -77,10 +78,18 @@ fun intFromString (s : string): int option =
     in
       case String.explode s of
           [] => NONE
-        | (#"~" :: cs) => (case parseDigits cs 0 of SOME n => SOME (~n) | NONE => NONE)
+        | (#"-" :: []) => NONE
         | (#"-" :: cs) => (case parseDigits cs 0 of SOME n => SOME (~n) | NONE => NONE)
         | cs => parseDigits cs 0
     end;
+
+fun ratioFromString (s : string) : (int * int) option =
+    case String.fields (fn c => c = #"/") s of
+        [numStr, denStr] =>
+          (case (intFromString numStr, intFromString denStr) of
+               (SOME n, SOME d) => SOME (n, d)
+             | _ => NONE)
+      | _ => NONE;
 
 fun allTrue (l : bool list) = (foldl (fn (x, acc) => x andalso acc) true l);
 
@@ -90,17 +99,62 @@ fun hasDuplicates l = case l of
                           [] => false
                         | h::rest => List.exists (fn x => x = h) rest orelse hasDuplicates rest
 
-fun SexpList (Atom _) = NONE
-  | SexpList (List l) = SOME l;
+fun sExpList (Atom _) = NONE
+  | sExpList (List l) = SOME l;
+
+fun gcd (a : int, 0) = Int.abs a
+  | gcd (a : int, b : int) = gcd (b, a mod b);
+
+fun normalizeRatio (_, 0) = raise SyntaxError "division by zero in ratio"
+  | normalizeRatio (num, den) =
+      let
+        val sign = if den < 0 then ~1 else 1
+        val n = sign * num
+        val d = sign * den
+        val g = gcd (n, d)
+        val n' = n div g
+        val d' = d div g
+      in
+        if d' = 1 then integer n'
+        else ratio (n', d')
+      end;
+
+fun toPair (integer n) = (n, 1)
+  | toPair (ratio (n, d)) = (n, d)
+  | toPair (boolean _) = raise InternalError "numerical arguments required in 'ToPair'";
+
+fun addRatio (c1 : constant, c2 : constant) : constant =
+    let
+      val (n1, d1) = toPair c1
+      val (n2, d2) = toPair c2
+      val g = gcd (d1, d2)
+      val lcm = (d1 div g) * d2
+      val num = n1 * (lcm div d1) + n2 * (lcm div d2)
+    in
+      normalizeRatio (num, lcm)
+    end;
+
+fun prodRatio (c1 : constant, c2 : constant) : constant =
+    let
+      val (n1, d1) = toPair c1
+      val (n2, d2) = toPair c2
+      val g1 = gcd (n1, d2)
+      val g2 = gcd (n2, d1)
+    in
+      normalizeRatio ((n1 div g1) * (n2 div g2), (d1 div g2) * (d2 div g1))
+    end;
+
+fun extractNumber (constVal (integer k)) = integer k
+  | extractNumber (constVal (ratio r)) = ratio r
+  | extractNumber _ = raise SyntaxError "The '+', '*', '>', '<', '>=', '<=' functions require numerical values as arguments";
 
 fun extractInt (constVal (integer k)) = k
-  | extractInt _ = raise SyntaxError "The '+', '*', 'mod', '>', '<', '>=', '<=' functions require numerical values as arguments";
+  | extractInt _ = raise SyntaxError "The 'mod' function require numerical values as arguments";
 
 fun extractBool (constVal (boolean k)) = k
   | extractBool _ = raise SyntaxError "The 'not', 'and', 'or' functions require boolean values as arguments";
 
 (*PARSING*)
-
 fun tokenize (s : string) : string list =
     let
       fun pad [] = []
@@ -151,7 +205,9 @@ fun interpretSexp (List []) = emptyList
          | "false" => const (boolean false)
          | _ => (case intFromString s of
                      SOME n => const (integer n)
-                   | NONE   => var s))
+                   | NONE   => (case ratioFromString s of
+                                   SOME (n, m) => const (ratio (n, m))
+                                 | NONE   => var s)))
   | interpretSexp (List (func :: args)) =
       (case args of
            [] => raise SyntaxError "List without arguments"
@@ -177,14 +233,14 @@ fun interpretSexp (List []) = emptyList
                    | Atom "let" => if (length args = 2 andalso
                                        (case hd args of
                                             List bindings =>
-                                              allTrue (map (fn binding => case SexpList binding of
+                                              allTrue (map (fn binding => case sExpList binding of
                                                                               SOME l => length l = 2
                                                                             | NONE   => raise SyntaxError "first arg of a 'let' statement must be a list of tuples (variable, expression)")
                                                            bindings)
                                           | Atom _ => false))
                                    then
                                      let
-                                       val bindings = (map (fn (List [x, v]) => (interpretSexp x, interpretSexp v) | _ => raise InternalError "error in let bindings") (valOf (SexpList (hd args))))
+                                       val bindings = (map (fn (List [x, v]) => (interpretSexp x, interpretSexp v) | _ => raise InternalError "error in let bindings") (valOf (sExpList (hd args))))
                                        val block = hd (tl args)
                                      in 
                                        multiLet(bindings, interpretSexp block)
@@ -193,19 +249,19 @@ fun interpretSexp (List []) = emptyList
                    | Atom "let*" => if (length args = 2 andalso
                                         (case hd args of
                                              List bindings =>
-                                               allTrue (map (fn binding => case SexpList binding of
+                                               allTrue (map (fn binding => case sExpList binding of
                                                                                SOME l => length l = 2
                                                                              | NONE   => raise SyntaxError "first arg of a 'let*' statement must be a list of tuples (variable, expression)")
                                                             bindings)
                                            | Atom _ => false))
                                     then
                                       let
-                                        val bindings = valOf (SexpList (hd args))
+                                        val bindings = valOf (sExpList (hd args))
                                         val block = hd (tl args)
                                       in
                                         foldr (fn (binding : s_exp, e : exp) =>
-                                                  let_ (interpretSexp(hd (valOf (SexpList binding))),
-                                                        interpretSexp(hd (tl (valOf (SexpList binding)))),
+                                                  let_ (interpretSexp(hd (valOf (sExpList binding))),
+                                                        interpretSexp(hd (tl (valOf (sExpList binding)))),
                                                         e))
                                               (interpretSexp block)
                                               bindings
@@ -214,14 +270,14 @@ fun interpretSexp (List []) = emptyList
                    | Atom "letrec" => if (length args = 2 andalso
                                        (case hd args of
                                             List bindings =>
-                                              allTrue (map (fn binding => case SexpList binding of
+                                              allTrue (map (fn binding => case sExpList binding of
                                                                               SOME l => length l = 2
                                                                             | NONE   => raise SyntaxError "first arg of a 'letrec' statement must be a list of tuples (variable, lambda)")
                                                            bindings)
                                           | Atom _ => false))
                                    then
                                      let
-                                       val bindings = (map (fn (List [x, v]) => (interpretSexp x, interpretSexp v) | _ => raise InternalError "error in let bindings") (valOf (SexpList (hd args))))
+                                       val bindings = (map (fn (List [x, v]) => (interpretSexp x, interpretSexp v) | _ => raise InternalError "error in let bindings") (valOf (sExpList (hd args))))
                                        val block = hd (tl args)
                                      in 
                                        letRec(bindings, interpretSexp block)
@@ -234,7 +290,7 @@ fun interpretSexp (List []) = emptyList
                                              | _ => false))
                                       then
                                         let
-                                          val inputVars = valOf (SexpList (hd args))
+                                          val inputVars = valOf (sExpList (hd args))
                                           val body = hd (tl args)
                                         in
                                           foldr (fn (inputVar : s_exp, e : exp) => lambda ((interpretSexp inputVar), e))
@@ -352,24 +408,38 @@ and applyOperator (E : environment, args : exp list, operator : string) =
         [] => raise InternalError "cannot have empty list of args"
       | _ =>
           case operator of
-              "+" => constVal (integer (foldl op+ 0 (map (fn x => extractInt (eval(E, x))) args)))
-            | "*" => constVal (integer (foldl op* 1 (map (fn x => extractInt (eval(E, x))) args)))
+              "+" => constVal (foldl addRatio (integer 0) (map (fn x => extractNumber (eval(E, x))) args))
+            | "*" => constVal (foldl prodRatio (integer 1) (map (fn x => extractNumber (eval(E, x))) args))
             | "=" => constVal (boolean (allTrue (map (fn x => (eval(E, (hd args)) = (eval(E, x)))) args)))
             | ">=" => let
-                        fun ge (l : int list) = case l of
-                                                    [] => raise InternalError "error in func ge"
-                                                  | _::[] => [true]
-                                                  | head::rest => (head >= (hd rest)) :: ge rest
+                        fun geNumber (c1 : constant, c2 : constant) : bool =
+                          let
+                            val (n1, d1) = toPair c1
+                            val (n2, d2) = toPair c2
+                          in
+                            n1 * d2 >= n2 * d1
+                          end;
+                        fun ge (l : constant list) = case l of
+                                                         [] => raise InternalError "error in func ge"
+                                                       | _::[] => [true]
+                                                       | head::rest => geNumber (head, hd rest) :: ge rest
                       in
-                        constVal (boolean (allTrue (ge (map (fn x => extractInt (eval(E, x))) args))))
+                        constVal (boolean (allTrue (ge (map (fn x => extractNumber (eval(E, x))) args))))
                       end
             | "<" => let
-                       fun lt (l : int list) = case l of
-                                                   [] => raise InternalError "error in func ge"
-                                                 | _::[] => [true]
-                                                 | head::rest => (head < (hd rest)) :: lt rest
+                       fun ltNumber (c1 : constant, c2 : constant) : bool =
+                          let
+                            val (n1, d1) = toPair c1
+                            val (n2, d2) = toPair c2
+                          in
+                            n1 * d2 < n2 * d1
+                          end;
+                       fun lt (l : constant list) = case l of
+                                                        [] => raise InternalError "error in func lt"
+                                                      | _::[] => [true]
+                                                      | head::rest => ltNumber (head, hd rest) :: lt rest
                      in
-                       constVal (boolean (allTrue (lt (map (fn x => extractInt (eval(E, x))) args))))
+                       constVal (boolean (allTrue (lt (map (fn x => extractNumber (eval(E, x))) args))))
                      end
             | "andalso" => constVal (boolean (allTrue (map (fn x => extractBool (eval(E, x))) args)))
             | "orelse" => constVal (boolean (atLeastOneTrue (map (fn x => extractBool (eval(E, x))) args)))
@@ -383,8 +453,9 @@ fun sExptoString (Atom s) = s
   | sExptoString (List l) ="( " ^ (String.concatWith " " (map sExptoString l)) ^ ")"
 
 fun expToString emptyList = "()"
-  | expToString (const (integer n)) = (Int.toString n)
-  | expToString (const (boolean b)) = (Bool.toString b)
+  | expToString (const (integer n)) = Int.toString n
+  | expToString (const (boolean b)) = Bool.toString b
+  | expToString (const (ratio(n, m))) = (Int.toString n) ^ "/" ^ (Int.toString m)
   | expToString (var x) = x
   | expToString (sum l) = "(+ " ^ (String.concatWith " " (map expToString l)) ^ ")"
   | expToString (prod l) = "(* " ^ (String.concatWith " " (map expToString l)) ^ ")"
@@ -397,8 +468,8 @@ fun expToString emptyList = "()"
   | expToString (not_ M) = "(not " ^ (expToString M) ^ ")"
   | expToString (ifThenElse (M, N, O)) = "(if " ^ (expToString M) ^ " " ^ (expToString N) ^ " " ^ (expToString O) ^ ")"
   | expToString (let_ (M, N, O)) = "(let* (" ^ (expToString M) ^ " " ^ (expToString N) ^ ") " ^ (expToString O) ^ ")"
-  | expToString (multiLet (l, M)) = "(let (" ^ (String.concatWith " " (map (fn (x, y) => "(" ^ (expToString x) ^ " " ^ (expToString y) ^ ")") l)) ^ " " ^ (expToString M) ^ ")"
-  | expToString (letRec (l, M)) = "(letrec (" ^ (String.concatWith " " (map (fn (x, y) => "(" ^ (expToString x) ^ " " ^ (expToString y) ^ ")") l)) ^ " " ^ (expToString M) ^ ")"
+  | expToString (multiLet (l, M)) = "(let (" ^ (String.concatWith " " (map (fn (x, y) => "(" ^ (expToString x) ^ " " ^ (expToString y) ^ ")") l)) ^ ") " ^ (expToString M) ^ ")"
+  | expToString (letRec (l, M)) = "(letrec (" ^ (String.concatWith " " (map (fn (x, y) => "(" ^ (expToString x) ^ " " ^ (expToString y) ^ ")") l)) ^ ") " ^ (expToString M) ^ ")"
   | expToString (lambda (M, N)) = "(lambda (" ^ (expToString M) ^ ")" ^ (expToString N) ^ ")"
   | expToString (lambdaApp (M, N)) = "(" ^ (expToString M) ^ " " ^ (expToString N) ^ ")"
   | expToString (cons (M, N)) = "(cons " ^ (expToString M) ^ " " ^ (expToString N) ^ ")"
@@ -414,6 +485,7 @@ fun envToString emptyEnv = ""
   | envToString (lazyextension(E, bindings)) = envToString E ^ foldl (fn (x, acc) => x ^ " " ^ acc) "" (map (fn (s, M) => "(" ^ s ^ ":" ^ (expToString M) ^ ")") bindings)
 and valueToString (constVal (integer n)) = ("constant : " , Int.toString n)
   | valueToString (constVal (boolean b)) = ("constant : " , Bool.toString b)
+  | valueToString (constVal (ratio (n, m))) = ("constant : " , (Int.toString n) ^ "/" ^ (Int.toString m))
   | valueToString (listVal l) = ("list : ", "(" ^ (String.concatWith " " (map (fn v => #2 (valueToString v)) l)) ^ ")")
   | valueToString (closure (var x, body, E)) = ("closure :" , "[" ^ x ^ ", " ^ (expToString body) ^ ", {" ^ (envToString E) ^ "}]")
   | valueToString (closure(_,_,_)) = raise InternalError "error in the closure"
