@@ -7,12 +7,14 @@ datatype constant = integer of int
 datatype exp = emptyList
              | const of constant
              | var of string
-             | sum of exp list (*int args*)
-             | prod of exp list (*int args*)
+             | opposite of exp (*num*)
+             | inverse of exp (*num*)
+             | sum of exp list (*num args*)
+             | prod of exp list (*num args*)
              | modulus of exp * exp (*m mod n*)
              | equals of exp list (*args*)
-             | greatOrEq of exp list (*int args*)
-             | lessThan of exp list (*int args*)
+             | greatOrEq of exp list (*num args*)
+             | lessThan of exp list (*num args*)
              | and_ of exp list (*bool args*)
              | or of exp list (*bool args*)
              | not_ of exp (*bool arg*)
@@ -217,7 +219,7 @@ fun equalValues (constVal c1, constVal c2) = equalConstants (c1, c2)
 fun extractNumber (constVal (integer k)) = integer k
   | extractNumber (constVal (ratio r)) = ratio r
   | extractNumber (constVal (realNum r)) = realNum r
-  | extractNumber _ = raise SyntaxError "The '+', '*', '>', '<', '>=', '<=' functions require numerical values as arguments";
+  | extractNumber _ = raise SyntaxError "The '+', '-', '/' , '*', '>', '<', '>=', '<=' functions require numerical values as arguments";
 
 fun extractInt (constVal (integer k)) = k
   | extractInt _ = raise SyntaxError "The 'mod' function require numerical values as arguments";
@@ -292,9 +294,22 @@ fun interpretSexp (List []) = emptyList
                                                       | NONE   => var s))))
   | interpretSexp (List (func :: args)) =
       (case args of
-           [] => raise SyntaxError "List without arguments"
+           [] => (case func of
+                      Atom "+" => const(integer 0)
+                    | Atom "*" => const(integer 1)
+                    | _ => raise SyntaxError "List without arguments")
          | _ => (case func of
-                     Atom "+" => sum (map interpretSexp args)
+                     Atom "-" =>
+                       (case args of
+                            [] => raise InternalError "check InterpretSexp of '-'"
+                          | h::[] => opposite(interpretSexp h)
+                          | h::rest => sum[(interpretSexp h), (opposite (sum (map interpretSexp rest)))])
+                   | Atom "/" =>
+                       (case args of
+                            [] => raise InternalError "check InterpretSexp of '-'"
+                          | h::[] => inverse(interpretSexp h)
+                          | h::rest => prod[(interpretSexp h), (inverse (prod (map interpretSexp rest)))])
+                   | Atom "+" => sum (map interpretSexp args)
                    | Atom "*" => prod (map interpretSexp args)
                    | Atom "mod" => if (length args = 2)
                                    then modulus(interpretSexp (hd args), interpretSexp (hd (tl args)))
@@ -422,6 +437,19 @@ fun eval(_, emptyList) = listVal []
       in
         lookup bindings
       end
+  | eval(E, opposite M) = constVal (case extractNumber(eval(E, M)) of 
+                              integer n => integer (~n)
+                            | ratio (n,m) => ratio ((~n), m)
+                            | realNum r => realNum (~r)
+                            | _ => raise InternalError "check eval opposite")
+  | eval(E, inverse M) = constVal (case extractNumber(eval(E, M)) of 
+                              integer n => normalizeRatio(1, n)
+                            | ratio (n,m) => normalizeRatio(m, n)
+                            | realNum r =>
+                                if Real.== (r, 0.0)
+                                then raise SyntaxError "division by zero"
+                                else realNum (1.0 / r)
+                            | _ => raise InternalError "check eval inverse")
   | eval(E, sum args) = applyOperator (E, args, "+")
   | eval(E, prod args) = applyOperator (E, args, "*")
   | eval(E, modulus(M, N)) = constVal (integer ((extractInt(eval(E, M))) mod (extractInt(eval(E, N)))))
@@ -521,6 +549,7 @@ and applyOperator (E : environment, args : exp list, operator : string) =
       | _ =>
           case operator of
               "+" => constVal (foldl addNumber (integer 0) (map (fn x => extractNumber (eval(E, x))) args))
+            | "-" => constVal (foldl addNumber (integer 0) (map (fn x => extractNumber (eval(E, x))) args))
             | "*" => constVal (foldl prodNumber (integer 1) (map (fn x => extractNumber (eval(E, x))) args))
             | "=" => constVal (boolean (allTrue (map (fn x => equalValues (eval(E, (hd args)), eval(E, x))) args)))
             | ">=" => let
@@ -557,6 +586,8 @@ fun sExptoString (Atom s) = s
 fun expToString emptyList = "()"
   | expToString (const k) = constToString k
   | expToString (var x) = x
+  | expToString (opposite M) = "(- " ^ (expToString M) ^ ")"
+  | expToString (inverse M) = "(/ " ^ (expToString M) ^ ")"
   | expToString (sum l) = "(+ " ^ (String.concatWith " " (map expToString l)) ^ ")"
   | expToString (prod l) = "(* " ^ (String.concatWith " " (map expToString l)) ^ ")"
   | expToString (modulus (M, N)) = "(mod " ^ (expToString M) ^ " " ^ (expToString N) ^ ")"
