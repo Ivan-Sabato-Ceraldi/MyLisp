@@ -35,6 +35,8 @@ datatype exp = emptyList
              | typeCheck of string * exp (*predicate, arg*)
              | import of exp list (*file paths*) * exp (*body*)
              | export of exp list (*exported variables*)
+             | exportAll
+             | error_ of exp (*error message string*)
 and s_exp = Atom of string | List of s_exp list;
 
 
@@ -87,17 +89,25 @@ exception InternalError of string;
 val reservedWords = [
     "true", "false",
     "if", "cond", "else", "let", "let*", "letrec", "lambda", "quote", "eval",
-    "cons", "list", "car", "cdr",
-    "null?", "atom?", "int?", "ratio?", "real?", "number?", "bool?", "symbol?", "list?", "string?",
-    "+", "-", "*", "/", "mod",
-    "concat", "explode",
-    "=", ">=", "<=", "<", ">",
-    "and", "or", "not",
+    "list",
+    "and", "or",
     "import", "export"
 ];
 
 fun isReserved (s : string) : bool =
     List.exists (fn kw => kw = s) reservedWords;
+
+val primNames : string list = [
+    "+", "-", "*", "/", "mod",
+    "=", "<", ">=", "<=", ">",
+    "not",
+    "cons", "car", "cdr",
+    "concat", "explode",
+    "null?", "atom?", "int?", "ratio?", "real?", "number?", "bool?", "symbol?", "list?", "string?"
+];
+
+fun isPrim (s : string) : bool =
+    List.exists (fn p => p = s) primNames;
 
 fun intFromString (s : string): int option =
     let
@@ -561,18 +571,23 @@ fun interpretSexp (List []) = emptyList
                        if (length args = 1)
                        then typeCheck (pred, interpretSexp (hd args))
                        else raise SyntaxError ("the '" ^ pred ^ "' statement requires 1 arg")
-                   | Atom "export" => export (map interpretSexp args)
+                   | Atom "export" => 
+                       (case args of 
+                            (Atom "*")::[] => exportAll
+                          | _ => export (map interpretSexp args))
                    | Atom "import" =>
-                       if length args = 2 then
-                         (case hd args of
-                              List (paths as _::_) =>
-                                import (map interpretSexp paths, interpretSexp (hd (tl args)))
-                            | List [] =>
-                                raise SyntaxError "the 'import' statement requires at least one file path"
-                            | Atom _ =>
-                                raise SyntaxError "first arg of an 'import' statement must be a list of file paths")
-                       else
-                         raise SyntaxError "the 'import' statement requires 2 args: a list of file paths and a body expression"
+                       if length args = 2
+                       then (case hd args of
+                                 List (paths as _::_) =>
+                                   import (map interpretSexp paths, interpretSexp (hd (tl args)))
+                               | List [] =>
+                                   raise SyntaxError "the 'import' statement requires at least one file path"
+                               | Atom _ =>
+                                   raise SyntaxError "first arg of an 'import' statement must be a list of file paths")
+                       else raise SyntaxError "the 'import' statement requires 2 args: a list of file paths and a body expression"
+                   | Atom "error" => if (length args = 1)
+                                     then error_ (interpretSexp (hd args))
+                                     else raise SyntaxError "the 'error' statement requires 1 arg"
                    | _ => foldl (fn (arg : s_exp, e : exp) => lambdaApp (e, (interpretSexp arg)))
                                 (interpretSexp func)
                                 args));
@@ -586,6 +601,48 @@ fun nextDepth (d : int) : int =
       raise RuntimeError ("maximum evaluation depth exceeded (" ^ Int.toString MAX_DEPTH ^ ")")
     else
       d + 1;
+
+val initialEnv : environment =
+    let
+      val prims = [
+          ("+",       closure (var "x", lambda (var "y", sum [var "x", var "y"]), emptyEnv)),
+          ("-",       closure (var "x", lambda (var "y", sum [var "x", opposite (var "y")]), emptyEnv)),
+          ("*",       closure (var "x", lambda (var "y", prod [var "x", var "y"]), emptyEnv)),
+          ("/",       closure (var "x", lambda (var "y", prod [var "x", inverse (var "y")]), emptyEnv)),
+          ("mod",     closure (var "x", lambda (var "y", modulus (var "x", var "y")), emptyEnv)),
+          ("=",       closure (var "x", lambda (var "y", equals [var "x", var "y"]), emptyEnv)),
+          ("<",       closure (var "x", lambda (var "y", lessThan [var "x", var "y"]), emptyEnv)),
+          (">=",      closure (var "x", lambda (var "y", greatOrEq [var "x", var "y"]), emptyEnv)),
+          ("<=",      closure (var "x", lambda (var "y", greatOrEq [var "y", var "x"]), emptyEnv)),
+          (">",       closure (var "x", lambda (var "y", lessThan [var "y", var "x"]), emptyEnv)),
+          ("not",     closure (var "x", not_ (var "x"), emptyEnv)),
+          ("cons",    closure (var "x", lambda (var "y", cons (var "x", var "y")), emptyEnv)),
+          ("car",     closure (var "x", car (var "x"), emptyEnv)),
+          ("cdr",     closure (var "x", cdr (var "x"), emptyEnv)),
+          ("concat",  closure (var "x", lambda (var "y", strConcat [var "x", var "y"]), emptyEnv)),
+          ("explode", closure (var "x", strExplode (var "x"), emptyEnv)),
+          ("null?",   closure (var "x", typeCheck ("null?", var "x"), emptyEnv)),
+          ("atom?",   closure (var "x", typeCheck ("atom?", var "x"), emptyEnv)),
+          ("int?",    closure (var "x", typeCheck ("int?", var "x"), emptyEnv)),
+          ("ratio?",  closure (var "x", typeCheck ("ratio?", var "x"), emptyEnv)),
+          ("real?",   closure (var "x", typeCheck ("real?", var "x"), emptyEnv)),
+          ("number?", closure (var "x", typeCheck ("number?", var "x"), emptyEnv)),
+          ("bool?",   closure (var "x", typeCheck ("bool?", var "x"), emptyEnv)),
+          ("symbol?", closure (var "x", typeCheck ("symbol?", var "x"), emptyEnv)),
+          ("list?",   closure (var "x", typeCheck ("list?", var "x"), emptyEnv)),
+          ("string?", closure (var "x", typeCheck ("string?", var "x"), emptyEnv))
+      ]
+    in
+      foldl (fn ((name, v), env) => extend (env, name, v))
+            emptyEnv
+            prims
+    end;
+
+fun extractVarName (var x, _) =
+      if isPrim x
+      then raise SyntaxError ("cannot shadow built-in primitive: " ^ x)
+      else x
+  | extractVarName (_, letType) = raise SyntaxError ("first arg in a '" ^ letType ^ " tuple' must be a variable");
 
 fun eval(_, _, emptyList) = listVal []
   | eval(_, _, const k) = constVal k
@@ -638,13 +695,10 @@ fun eval(_, _, emptyList) = listVal []
       if extractBool (eval (d, E, condition))
       then eval(d, E, M)
       else eval(d, E, N)
-  | eval(d, E, let_(var x, M, N)) =
-      eval(d, extend(E, x, eval(d, E, M)), N)
-  | eval(_, _, let_ _) = raise SyntaxError "first arg in a 'let* tuple' must be a variable"
+  | eval(d, E, let_(V, M, N)) = eval(d, extend(E, extractVarName(V, "let*"), eval(d, E, M)), N)
   | eval(d, E, multiLet(bindings, M)) =
       let
-        val varNames = map (fn (var x, _) => x
-                             | _ => raise SyntaxError "first arg in a 'let tuple' must be a variable") bindings
+        val varNames = map (fn (x, _) => extractVarName(x, "let")) bindings
       in
         if (not (hasDuplicates varNames))
         then
@@ -662,16 +716,19 @@ fun eval(_, _, emptyList) = listVal []
   | eval(d, E, letRec(bindings, M)) =
       let
         val validBindings = map (fn (V, F) =>
-                                   (case (V, F) of
-                                        (var x, lambda _) => (x, F)
-                                      | _ => raise SyntaxError "a 'letrec tuple' must be composed by a variable and a lambda function"))
+                                   (case F of
+                                        lambda _ => (extractVarName(V, "letrec"), F)
+                                      | _ => raise SyntaxError "first arg in a 'letrec tuple' must be a lambda declaration"))
                                 bindings
       in
         if (not (hasDuplicates (map (fn (x, _) => x) validBindings)))
         then eval(d, recExtend(E, validBindings), M)
         else raise SyntaxError "there cannot be duplicates variables in the 'letrec' statement, use 'let*' instead"
       end
-  | eval(_, E, lambda(var x, M)) = closure(var x, M, E)
+  | eval(_, E, lambda(var x, M)) =
+      if isPrim x 
+      then raise SyntaxError ("cannot shadow built-in primitive: " ^ x)
+      else closure(var x, M, E)
   | eval(_, _, lambda _) = raise SyntaxError "first element in a list must be a function or operator"
   | eval(d, E, lambdaApp(M, N)) =
       let val d' = nextDepth d in
@@ -779,13 +836,43 @@ fun eval(_, _, emptyList) = listVal []
       let
         val varNames = map (fn (var x) => x
                              | _ => raise SyntaxError "arguments of 'export' must be variables") args
-        fun exportEnv [] = emptyEnv
-          | exportEnv (x::rest) = eagerextension((exportEnv rest), x, eval(d, E, var x))
+        fun exportedEnv [] = emptyEnv
+          | exportedEnv (x::rest) =
+              if isPrim x
+              then raise SyntaxError ("cannot export built-in primitive: " ^ x)
+              else eagerextension((exportedEnv rest), x, eval(d, E, var x))
       in
         if (not (hasDuplicates varNames))
-        then envVal (exportEnv varNames)
+        then envVal (exportedEnv varNames)
         else raise SyntaxError "cannot 'export' the same variable twice"
       end
+   | eval(d, E, exportAll) =
+      let
+        fun collect (emptyEnv, _, acc) = acc
+          | collect (eagerextension (rest, x, v), seen, acc) =
+              if isPrim x
+              then collect (rest, seen, acc)
+              else if List.exists (fn s => s = x) seen
+              then collect (rest, seen, acc)
+              else collect (rest, x :: seen, eagerextension (acc, x, v))
+          | collect (env as lazyextension (rest, bindings), seen, acc) =
+              let
+                val (seen', acc') =
+                    foldl (fn ((x, _), (sAcc, eAcc)) =>
+                             if List.exists (fn s => s = x) sAcc then (sAcc, eAcc)
+                             else (x :: sAcc, eagerextension (eAcc, x, eval (d, env, var x))))
+                          (seen, acc)
+                          bindings
+              in
+                collect (rest, seen', acc')
+              end
+      in
+        envVal (collect (E, [], emptyEnv))
+      end
+   | eval(d, E, error_ M) =
+    (case eval(d, E, M) of
+         constVal (stringVal msg) => raise RuntimeError msg
+       | _ => raise SyntaxError "the 'error' function requires a string value as arg")
 
 (*HELPER*)
 and applyOperator (d : int, E : environment, args : exp list, operator : string) =
@@ -821,8 +908,9 @@ and applyOperator (d : int, E : environment, args : exp list, operator : string)
 
 (*FINAL EXECUTION*)
 and executeStrWithDepth (d : int) (program : string) : value =
-    eval(d, emptyEnv, interpretSexp(parseSexp program))
-and executeStr (program : string) : value =
+    eval(d, initialEnv, interpretSexp(parseSexp program))
+    
+fun executeStr (program : string) : value =
     executeStrWithDepth 0 program;
 
 fun sExptoString (Atom s) = s
@@ -852,15 +940,20 @@ fun expToString emptyList = "()"
   | expToString (lambdaApp (M, N)) = "(" ^ (expToString M) ^ " " ^ (expToString N) ^ ")"
   | expToString (cons (M, N)) = "(cons " ^ (expToString M) ^ " " ^ (expToString N) ^ ")"
   | expToString (car M) = "(car " ^ (expToString M) ^ ")"
-  | expToString (cdr M) = "(cdr " ^ (expToString M) ^ ")"
+  | expToString (cdr M) = "(cdr " ^ (expToString M) ^ ")" 
   | expToString (quote S) = "(quote " ^ (sExptoString S) ^ ")"
   | expToString (eval_ M) = "(eval " ^ (expToString M) ^ ")"
   | expToString (typeCheck (pred, M)) = "(" ^ pred ^ " " ^ (expToString M) ^ ")"
   | expToString (import (l, M)) = "(import (" ^ (String.concatWith " " (map expToString l)) ^ ") " ^ (expToString M) ^ ")"
   | expToString (export l) = "(export " ^ (String.concatWith " " (map expToString l)) ^ ")"
+  | expToString exportAll = "(export *)"
+  | expToString (error_ M) = "(error " ^ (expToString M) ^ ")" 
 
 fun envToString emptyEnv = ""
-  | envToString (eagerextension(E, s, v)) = envToString E ^ "(" ^ s ^ " : " ^ (#2 (valueToString v)) ^ ")"
+  | envToString (eagerextension(E, s, v)) =
+      if isPrim s
+      then envToString E
+      else envToString E ^ "(" ^ s ^ " : " ^ (#2 (valueToString v)) ^ ")"
   | envToString (lazyextension(E, bindings)) = envToString E ^ foldl (fn (x, acc) => x ^ " " ^ acc) "" (map (fn (s, M) => "(" ^ s ^ ":" ^ (expToString M) ^ ")") bindings)
 and valueToString (constVal k) = ("constant : ", constToString k)
   | valueToString (listVal l) = ("list : ", "(" ^ (String.concatWith " " (map (fn v => #2 (valueToString v)) l)) ^ ")")
