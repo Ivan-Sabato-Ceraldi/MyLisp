@@ -1,0 +1,22 @@
+
+(let* (
+        (id (lambda (x) x))
+            (const (lambda (x) (lambda (y) x)))
+            (compose (lambda (f g x) (f (g x))))
+            (pipe (lambda (f g x) (g (f x))))
+            (flip (lambda (f x y) (f y x)))
+            (negate (lambda (pred x) (not (pred x))))
+            (both (lambda (pred1 pred2 x) (and (pred1 x) (pred2 x))))
+            (either (lambda (pred1 pred2 x) (or (pred1 x) (pred2 x))))
+            (curry (lambda (f x y) (f (list x y))))
+            (apply-to (lambda (x f) (f x)))
+    )
+    (letrec (
+            (apply-n (lambda (n f x)
+            (if (<= n 0)
+                x
+                (apply-n (- n 1) f (f x)))))
+        )
+        (export *)
+    )
+)
