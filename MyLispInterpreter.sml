@@ -12,6 +12,7 @@ datatype exp = emptyList
              | inverse of exp (*num*)
              | sum of exp list (*num args*)
              | prod of exp list (*num args*)
+             | pow of exp * exp (*x^(y)*)
              | modulus of exp * exp (*m mod n*)
              | strConcat of exp list (*string args*)
              | strExplode of exp (*string*)
@@ -33,6 +34,7 @@ datatype exp = emptyList
              | quote of s_exp
              | eval_ of exp (*quoted value*)
              | typeCheck of string * exp (*predicate, arg*)
+             | typeConvert of string * exp
              | import of exp list (*file paths*) * exp (*body*)
              | export of exp list (*exported variables*)
              | exportAll
@@ -98,12 +100,14 @@ fun isReserved (s : string) : bool =
     List.exists (fn kw => kw = s) reservedWords;
 
 val primNames : string list = [
-    "+", "-", "*", "/", "mod",
+    "+", "-", "*", "/", "pow", "mod",
     "=", "<", ">=", "<=", ">",
     "not",
     "cons", "car", "cdr",
     "concat", "explode",
-    "null?", "atom?", "int?", "ratio?", "real?", "number?", "bool?", "symbol?", "list?", "string?"
+    "null?", "atom?", "int?", "ratio?", "real?", "number?", "bool?", "symbol?", "list?", "string?",
+    "int->string", "string->int", "real->string", "string->real", "ratio->string", "string->ratio", "bool->string", "string->bool",
+    "ratio->real", "real->ratio", "floor", "ceiling", "round"
 ];
 
 fun isPrim (s : string) : bool =
@@ -179,10 +183,14 @@ fun normalizeRatio (_, 0) = raise SyntaxError "division by zero in ratio"
         else ratio (n', d')
       end;
 
+
+
 fun toPair (integer n) = (n, 1)
   | toPair (ratio (n, d)) = (n, d)
   | toPair (realNum _) = raise InternalError "numerical arguments required in 'ToPair'"
   | toPair _ = raise InternalError "numerical arguments required in 'ToPair'";
+
+
 
 fun toReal (integer n) = Real.fromInt n
   | toReal (ratio (n, d)) = (Real.fromInt n) / (Real.fromInt d)
@@ -218,6 +226,71 @@ fun prodNumber (realNum r1, c2) = realNum (r1 * toReal c2)
   | prodNumber (c1, realNum r2) = realNum (toReal c1 * r2)
   | prodNumber (c1, c2) = prodRatio (c1, c2);
 
+fun intPow (_, 0) = 1
+  | intPow (base, exp) =
+      if exp mod 2 = 0 then
+        let val half = intPow (base, exp div 2)
+        in half * half
+        end
+      else
+        base * intPow (base, exp - 1);
+
+fun powRatio (c1 : constant, integer 0) =
+      (case c1 of
+           integer 0 => integer 1
+         | ratio (0, _) => integer 1
+         | _ => integer 1)
+  | powRatio (c1 : constant, integer n) =
+      let
+        val (num, den) = toPair c1
+      in
+        (if n > 0 then
+           normalizeRatio (intPow (num, n), intPow (den, n))
+         else if num = 0 then
+           raise RuntimeError "division by zero in pow"
+         else
+           normalizeRatio (intPow (den, ~n), intPow (num, ~n)))
+        handle Overflow => raise RuntimeError "pow: integer overflow"
+      end
+  | powRatio (c1 : constant, c2 as ratio _) =
+      let
+        val base = toReal c1
+        val exponent = toReal c2
+        val res = Math.pow (base, exponent)
+      in
+        if Real.isNan res then
+          raise RuntimeError "pow: result is undefined (NaN)"
+        else if not (Real.isFinite res) then
+          raise RuntimeError "pow: division by zero or overflow"
+        else
+          realNum res
+      end
+  | powRatio _ = raise InternalError "numerical arguments required in 'powRatio'";
+
+fun powNumber (realNum r1, c2) =
+      let
+        val res = Math.pow (r1, toReal c2)
+      in
+        if Real.isNan res then
+          raise RuntimeError "pow: result is undefined (NaN)"
+        else if not (Real.isFinite res) then
+          raise RuntimeError "pow: division by zero or overflow"
+        else
+          realNum res
+      end
+  | powNumber (c1, realNum r2) =
+      let
+        val res = Math.pow (toReal c1, r2)
+      in
+        if Real.isNan res then
+          raise RuntimeError "pow: result is undefined (NaN)"
+        else if not (Real.isFinite res) then
+          raise RuntimeError "pow: division by zero or overflow"
+        else
+          realNum res
+      end
+  | powNumber (c1, c2) = powRatio (c1, c2);
+
 fun geNumber (realNum r1, c2) = r1 >= toReal c2
   | geNumber (c1, realNum r2) = toReal c1 >= r2
   | geNumber (c1, c2) =
@@ -237,6 +310,19 @@ fun ltNumber (realNum r1, c2) = r1 < toReal c2
       in
         n1 * d2 < n2 * d1
       end;
+
+fun realToRatio (r : real) : constant =
+    if not (Real.isFinite r) then
+      raise RuntimeError "real->ratio: cannot convert NaN or infinity to ratio"
+    else
+      let
+        val {whole, frac} = Real.split r
+        val wholeInt = Real.trunc whole
+        val fracRatio = normalizeRatio (Real.round (frac * 1000000000.0), 1000000000)
+      in
+        addRatio (integer wholeInt, fracRatio)
+      end
+      handle Overflow => raise RuntimeError "real->ratio: number too large to convert to ratio";
 
 fun equalConstants (integer n1, integer n2) = n1 = n2
   | equalConstants (boolean b1, boolean b2) = b1 = b2
@@ -259,7 +345,7 @@ fun equalValues (constVal c1, constVal c2) = equalConstants (c1, c2)
 fun extractNumber (constVal (integer k)) = integer k
   | extractNumber (constVal (ratio r)) = ratio r
   | extractNumber (constVal (realNum r)) = realNum r
-  | extractNumber _ = raise SyntaxError "The '+', '-', '/' , '*', '>', '<', '>=', '<=' functions require numerical values as arguments";
+  | extractNumber _ = raise SyntaxError "The '+', '-', '/', '*', 'pow', '>', '<', '>=', '<=' functions require numerical values as arguments";
 
 fun extractInt (constVal (integer k)) = k
   | extractInt _ = raise SyntaxError "The 'mod' function require numerical values as arguments";
@@ -298,6 +384,10 @@ fun stringFromAtom (s : string) : string option =
       else
         NONE
     end;
+
+fun smlSignToMinus s =
+    String.translate (fn #"~" => "-" | c => str c) s
+
 
 fun readFile (path : string) : string =
     let
@@ -447,6 +537,9 @@ fun interpretSexp (List []) = emptyList
                           | h::rest => prod[(interpretSexp h), (inverse (prod (map interpretSexp rest)))])
                    | Atom "+" => sum (map interpretSexp args)
                    | Atom "*" => prod (map interpretSexp args)
+                   | Atom "pow" => if (length args = 2)
+                                   then pow(interpretSexp (hd args), interpretSexp (hd (tl args)))
+                                   else raise SyntaxError "the 'pow' function requires 2 args"
                    | Atom "mod" => if (length args = 2)
                                    then modulus(interpretSexp (hd args), interpretSexp (hd (tl args)))
                                    else raise SyntaxError "the 'mod' function requires 2 args"
@@ -571,6 +664,10 @@ fun interpretSexp (List []) = emptyList
                        if (length args = 1)
                        then typeCheck (pred, interpretSexp (hd args))
                        else raise SyntaxError ("the '" ^ pred ^ "' statement requires 1 arg")
+                   | Atom (pred as ("int->string" | "string->int" | "real->string" | "string->real" | "ratio->string" | "string->ratio" | "bool->string" | "string->bool" | "ratio->real" | "real->ratio" | "floor" | "ceiling" | "round")) =>
+                       if (length args = 1)
+                       then typeConvert (pred, interpretSexp (hd args))
+                       else raise SyntaxError ("the '" ^ pred ^ "' statement requires 1 arg")
                    | Atom "export" => 
                        (case args of 
                             (Atom "*")::[] => exportAll
@@ -609,6 +706,7 @@ val initialEnv : environment =
           ("-",       closure (var "x", lambda (var "y", sum [var "x", opposite (var "y")]), emptyEnv)),
           ("*",       closure (var "x", lambda (var "y", prod [var "x", var "y"]), emptyEnv)),
           ("/",       closure (var "x", lambda (var "y", prod [var "x", inverse (var "y")]), emptyEnv)),
+          ("pow",     closure (var "x", lambda (var "y", pow (var "x", var "y")), emptyEnv)),
           ("mod",     closure (var "x", lambda (var "y", modulus (var "x", var "y")), emptyEnv)),
           ("=",       closure (var "x", lambda (var "y", equals [var "x", var "y"]), emptyEnv)),
           ("<",       closure (var "x", lambda (var "y", lessThan [var "x", var "y"]), emptyEnv)),
@@ -630,7 +728,20 @@ val initialEnv : environment =
           ("bool?",   closure (var "x", typeCheck ("bool?", var "x"), emptyEnv)),
           ("symbol?", closure (var "x", typeCheck ("symbol?", var "x"), emptyEnv)),
           ("list?",   closure (var "x", typeCheck ("list?", var "x"), emptyEnv)),
-          ("string?", closure (var "x", typeCheck ("string?", var "x"), emptyEnv))
+          ("string?", closure (var "x", typeCheck ("string?", var "x"), emptyEnv)),
+          ("int->string",   closure (var "x", typeConvert ("int->string", var "x"), emptyEnv)),
+          ("string->int",   closure (var "x", typeConvert ("string->int", var "x"), emptyEnv)),
+          ("real->string",  closure (var "x", typeConvert ("real->string", var "x"), emptyEnv)),
+          ("string->real",  closure (var "x", typeConvert ("string->real", var "x"), emptyEnv)),
+          ("ratio->string", closure (var "x", typeConvert ("ratio->string", var "x"), emptyEnv)),
+          ("string->ratio", closure (var "x", typeConvert ("string->ratio", var "x"), emptyEnv)),
+          ("bool->string",  closure (var "x", typeConvert ("bool->string", var "x"), emptyEnv)),
+          ("string->bool",  closure (var "x", typeConvert ("string->bool", var "x"), emptyEnv)),
+          ("ratio->real", closure (var "x", typeConvert ("ratio->real", var "x"), emptyEnv)),
+          ("real->ratio", closure (var "x", typeConvert ("real->ratio", var "x"), emptyEnv)),
+          ("floor",       closure (var "x", typeConvert ("floor", var "x"), emptyEnv)),
+          ("ceiling",     closure (var "x", typeConvert ("ceiling", var "x"), emptyEnv)),
+          ("round",       closure (var "x", typeConvert ("round", var "x"), emptyEnv))
       ]
     in
       foldl (fn ((name, v), env) => extend (env, name, v))
@@ -678,6 +789,8 @@ fun eval(_, _, emptyList) = listVal []
                   | _ => raise InternalError "check eval inverse")
   | eval(d, E, sum args) = applyOperator (d, E, args, "+")
   | eval(d, E, prod args) = applyOperator (d, E, args, "*")
+  | eval(d, E, pow(M, N)) =
+      constVal (powNumber(extractNumber(eval(d, E, M)), extractNumber(eval(d, E, N))))
   | eval(d, E, modulus(M, N)) =
       constVal (integer ((extractInt(eval(d, E, M))) mod (extractInt(eval(d, E, N)))))
   | eval(d, E, strConcat args) = applyOperator (d, E, args, "^")
@@ -806,6 +919,96 @@ fun eval(_, _, emptyList) = listVal []
       in
         constVal (boolean res)
       end
+  | eval(d, E, typeConvert(name, e)) =
+    (case (name, eval(nextDepth d, E, e)) of
+         ("int->string", constVal (integer n)) =>
+             constVal (stringVal (smlSignToMinus (Int.toString n)))
+       | ("int->string", _) =>
+             raise RuntimeError "int->string requires an integer argument"
+
+       | ("string->int", constVal (stringVal s)) =>
+             (case intFromString s of
+                  SOME n => constVal (integer n)
+                | NONE   => raise RuntimeError ("string->int: cannot parse integer from \"" ^ s ^ "\""))
+       | ("string->int", _) =>
+             raise RuntimeError "string->int requires a string argument"
+
+       | ("real->string", constVal (realNum r)) =>
+             constVal (stringVal (smlSignToMinus (Real.toString r)))
+       | ("real->string", _) =>
+             raise RuntimeError "real->string requires a real argument"
+
+       | ("string->real", constVal (stringVal s)) =>
+             (case realFromString s of
+                  SOME r => constVal (realNum r)
+                | NONE   => raise RuntimeError ("string->real: cannot parse real from \"" ^ s ^ "\""))
+       | ("string->real", _) =>
+             raise RuntimeError "string->real requires a string argument"
+
+       | ("ratio->string", constVal (ratio (n, den))) =>
+             constVal (stringVal ((smlSignToMinus (Int.toString n)) ^ "/" ^ (smlSignToMinus (Int.toString den))))
+       | ("ratio->string", _) =>
+             raise RuntimeError "ratio->string requires a ratio argument"
+
+       | ("string->ratio", constVal (stringVal s)) =>
+             (case ratioFromString s of
+                  SOME (_, 0)   => raise RuntimeError "string->ratio: denominator cannot be zero"
+                | SOME (n, den) => constVal (normalizeRatio (n, den))
+                | NONE          => raise RuntimeError ("string->ratio: cannot parse ratio from \"" ^ s ^ "\""))
+       | ("string->ratio", _) =>
+             raise RuntimeError "string->ratio requires a string argument"
+       | ("bool->string", constVal (boolean b)) =>
+             constVal (stringVal (if b then "true" else "false"))
+       | ("bool->string", _) =>
+             raise RuntimeError "bool->string requires a boolean argument"
+
+       | ("string->bool", constVal (stringVal "true")) =>
+             constVal (boolean true)
+       | ("string->bool", constVal (stringVal "false")) =>
+             constVal (boolean false)
+       | ("string->bool", constVal (stringVal s)) =>
+             raise RuntimeError ("string->bool: cannot parse boolean from \"" ^ s ^ "\"")
+       | ("string->bool", _) =>
+             raise RuntimeError "string->bool requires a boolean argument"
+
+       | ("ratio->real", constVal (c as ratio _)) =>
+             constVal (realNum (toReal c))
+       | ("ratio->real", _) =>
+             raise RuntimeError "ratio->real requires a ratio argument"
+
+       | ("real->ratio", constVal (realNum r)) =>
+             constVal (realToRatio r)
+       | ("real->ratio", _) =>
+             raise RuntimeError "real->ratio requires a real argument"
+
+       | ("floor", constVal (integer n)) =>
+             constVal (integer n)
+       | ("floor", constVal (realNum r)) =>
+             constVal (integer (Real.floor r))
+       | ("floor", constVal (ratio (n, den))) =>
+             constVal (integer (n div den))   (* SML 'div' is floor division toward -infinity *)
+       | ("floor", _) =>
+             raise RuntimeError "floor requires a numerical argument"
+
+       | ("ceiling", constVal (integer n)) =>
+             constVal (integer n)
+       | ("ceiling", constVal (realNum r)) =>
+             constVal (integer (Real.ceil r))
+       | ("ceiling", constVal (ratio (n, den))) =>
+             constVal (integer (~((~n) div den)))
+       | ("ceiling", _) =>
+             raise RuntimeError "ceiling requires a numerical argument"
+
+       | ("round", constVal (integer n)) =>
+             constVal (integer n)
+       | ("round", constVal (realNum r)) =>
+             constVal (integer (Real.round r))
+       | ("round", constVal (ratio (n, den))) =>
+             constVal (integer (Real.round ((Real.fromInt n) / (Real.fromInt den))))
+       | ("round", _) =>
+             raise RuntimeError "round requires a numerical argument"
+       | (unknown, _) =>
+             raise InternalError ("unknown typeConverter: " ^ unknown))
   | eval(d, E, import (args, M)) =
       let
         val d' = nextDepth d
@@ -923,6 +1126,7 @@ fun expToString emptyList = "()"
   | expToString (inverse M) = "(/ " ^ (expToString M) ^ ")"
   | expToString (sum l) = "(+ " ^ (String.concatWith " " (map expToString l)) ^ ")"
   | expToString (prod l) = "(* " ^ (String.concatWith " " (map expToString l)) ^ ")"
+  | expToString (pow (M, N)) = "(pow " ^ (expToString M) ^ " " ^ (expToString N) ^ ")"
   | expToString (modulus (M, N)) = "(mod " ^ (expToString M) ^ " " ^ (expToString N) ^ ")"
   | expToString (strConcat l) = "(concat " ^ (String.concatWith " " (map expToString l)) ^ ")"
   | expToString (strExplode M) = "(explode " ^ (expToString M) ^ ")"
@@ -944,6 +1148,7 @@ fun expToString emptyList = "()"
   | expToString (quote S) = "(quote " ^ (sExptoString S) ^ ")"
   | expToString (eval_ M) = "(eval " ^ (expToString M) ^ ")"
   | expToString (typeCheck (pred, M)) = "(" ^ pred ^ " " ^ (expToString M) ^ ")"
+  | expToString (typeConvert (pred, M)) = "(" ^ pred ^ " " ^ (expToString M) ^ ")"
   | expToString (import (l, M)) = "(import (" ^ (String.concatWith " " (map expToString l)) ^ ") " ^ (expToString M) ^ ")"
   | expToString (export l) = "(export " ^ (String.concatWith " " (map expToString l)) ^ ")"
   | expToString exportAll = "(export *)"
@@ -971,6 +1176,3 @@ fun executeFile (path : string) =
             | exn => raise exn)
     else
       print "\027[31mFileError: expected a .mylisp extension\027[0m\n";
-
-(*---FINAL TEST---*)
-executeFile "test.mylisp";
