@@ -5,50 +5,50 @@ datatype constant = integer of int
                   | realNum of real
                   | stringVal of string;
 
-datatype exp = emptyList
-             | const of constant
-             | var of string
-             | opposite of exp (*num*)
-             | inverse of exp (*num*)
-             | sum of exp list (*num args*)
-             | prod of exp list (*num args*)
-             | pow of exp * exp (*x^(y)*)
-             | modulus of exp * exp (*m mod n*)
-             | strConcat of exp list (*string args*)
-             | strExplode of exp (*string*)
-             | equals of exp list (*args*)
-             | greatOrEq of exp list (*num args*)
-             | lessThan of exp list (*num args*)
-             | and_ of exp list (*bool args*)
-             | or of exp list (*bool args*)
-             | not_ of exp (*bool arg*)
-             | ifThenElse of exp (*bool arg*) * exp (*then block*) * exp (*else block*)             
-             | let_ of exp (*declared var*) * exp (*assigned value*) * exp (*local block*)
-             | multiLet of (exp * exp) list (*bindings*) * exp (*local block*)
-             | letRec of (exp * exp) list (*bindings*) * exp (*local block*)
-             | lambda of exp (*input var*) * exp (*function body*)
-             | lambdaApp of exp (*lambda function*) * exp (*argument*)
-             | cons of exp (*head*) * exp (*rest*)
-             | car of exp (*list*)
-             | cdr of exp (*list*)
-             | quote of s_exp
-             | eval_ of exp (*quoted value*)
-             | typeCheck of string * exp (*predicate, arg*)
-             | typeConvert of string * exp
-             | import of exp list (*file paths*) * exp (*body*)
-             | export of exp list (*exported variables*)
-             | exportAll
-             | error_ of exp (*error message string*)
+datatype myLisp = emptyList
+                | const of constant
+                | var of string
+                | opposite of myLisp (*num*)
+                | inverse of myLisp (*num*)
+                | sum of myLisp list (*num args*)
+                | prod of myLisp list (*num args*)
+                | pow of myLisp * myLisp (*x^(y)*)
+                | modulus of myLisp * myLisp (*m mod n*)
+                | strConcat of myLisp list (*string args*)
+                | strExplode of myLisp (*string*)
+                | equals of myLisp list (*args*)
+                | greatOrEq of myLisp list (*num args*)
+                | lessThan of myLisp list (*num args*)
+                | and_ of myLisp list (*bool args*)
+                | or of myLisp list (*bool args*)
+                | not_ of myLisp (*bool arg*)
+                | ifThenElse of myLisp (*bool arg*) * myLisp (*then block*) * myLisp (*else block*)             
+                | let_ of myLisp (*declared var*) * myLisp (*assigned value*) * myLisp (*local block*)
+                | multiLet of (myLisp * myLisp) list (*bindings*) * myLisp (*local block*)
+                | letRec of (myLisp * myLisp) list (*bindings*) * myLisp (*local block*)
+                | lambda of myLisp (*input var*) * myLisp (*function body*)
+                | lambdaApp of myLisp (*lambda function*) * myLisp (*argument*)
+                | cons of myLisp (*head*) * myLisp (*rest*)
+                | car of myLisp (*list*)
+                | cdr of myLisp (*list*)
+                | quote of s_exp
+                | eval_ of myLisp (*quoted value*)
+                | typeCheck of string * myLisp (*predicate, arg*)
+                | typeConvert of string * myLisp
+                | import of myLisp list (*file paths*) * myLisp (*body*)
+                | export of myLisp list (*exported variables*)
+                | exportAll
+                | error_ of myLisp (*error message string*)
 and s_exp = Atom of string | List of s_exp list;
 
 
 datatype environment = emptyEnv
                      | eagerextension of environment * string * value
-                     | lazyextension of environment * (string * exp) list
+                     | lazyextension of environment * (string * myLisp) list
 and      value = constVal of constant
                | symbolVal of string
                | listVal of value list
-               | closure of exp * exp (*lambda (var,body)*) * environment (*environment of declaration*)
+               | closure of myLisp * myLisp (*lambda (var,body)*) * environment (*environment of declaration*)
                | envVal of environment;
 
 fun extend (emptyEnv, s, v) = eagerextension (emptyEnv, s, v)
@@ -604,7 +604,7 @@ fun interpretSexp (List []) = emptyList
                                         val bindings = valOf (sExpList (hd args))
                                         val block = hd (tl args)
                                       in
-                                        foldr (fn (binding : s_exp, e : exp) =>
+                                        foldr (fn (binding : s_exp, e : myLisp) =>
                                                   let_ (interpretSexp(hd (valOf (sExpList binding))),
                                                         interpretSexp(hd (tl (valOf (sExpList binding)))),
                                                         e))
@@ -639,7 +639,7 @@ fun interpretSexp (List []) = emptyList
                                           val inputVars = valOf (sExpList (hd args))
                                           val body = hd (tl args)
                                         in
-                                          foldr (fn (inputVar : s_exp, e : exp) => lambda ((interpretSexp inputVar), e))
+                                          foldr (fn (inputVar : s_exp, e : myLisp) => lambda ((interpretSexp inputVar), e))
                                                 (interpretSexp body)
                                                 inputVars
                                         end
@@ -685,7 +685,7 @@ fun interpretSexp (List []) = emptyList
                    | Atom "error" => if (length args = 1)
                                      then error_ (interpretSexp (hd args))
                                      else raise SyntaxError "the 'error' statement requires 1 arg"
-                   | _ => foldl (fn (arg : s_exp, e : exp) => lambdaApp (e, (interpretSexp arg)))
+                   | _ => foldl (fn (arg : s_exp, e : myLisp) => lambdaApp (e, (interpretSexp arg)))
                                 (interpretSexp func)
                                 args));
 
@@ -1086,7 +1086,7 @@ fun eval(_, _, _, emptyList) = listVal []
        | _ => raise SyntaxError "the 'error' function requires a string value as arg")
 
 (*HELPER*)
-and applyOperator (d : int, baseDir : string, E : environment, args : exp list, operator : string) =
+and applyOperator (d : int, baseDir : string, E : environment, args : myLisp list, operator : string) =
     case args of
         [] => raise InternalError "cannot have empty list of args in applyOperator"
       | _ =>
@@ -1185,5 +1185,5 @@ fun executeFile (path : string) =
     else
       print "\027[31mFileError: expected a .mylisp extension\027[0m\n";
 
-(*EXECUSION OF THE TEST FILE*)
+(*EXECUTION OF THE TEST FILE*)
 executeFile "test.mylisp";
