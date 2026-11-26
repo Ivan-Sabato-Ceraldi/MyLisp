@@ -26,7 +26,7 @@ The implementation in `MyLispInterpreter.sml` mirrors the formal separation betw
 
 1. **Lexical Analysis (`tokenize`) & S-Expression Parsing (`parseSexp`):**
    * Converts raw source text into an intermediate symbolic tree (`datatype s_exp = Atom of string | List of s_exp list`), handling comments (`;`), string escapes, quote shorthand (`'expr`), and case-insensitive symbols.
-2. **Inductive Abstract Syntax (`interpretSexp` $\rightarrow$ `exp`):**
+2. **Inductive Abstract Syntax (`s_exp` $\rightarrow$ `myLisp`):**
    * The core language is defined as an **inductive algebra** via Standard ML's recursive `datatype` construct (`datatype myLisp = emptyList | const of constant | var of string | ...`).
    * `interpretSexp` acts as the syntactic elaboration pass, translating concrete S-expressions into well-formed AST terms, desugaring derived forms (such as `cond`, `let*`, `list`, multi-argument `lambda`, and multi-argument function application), and enforcing static well-formedness rules (`SyntaxError`).
 3. **Operational Semantics (`eval`):**
